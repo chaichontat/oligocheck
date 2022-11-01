@@ -16,7 +16,7 @@ FLANKING_5 = {
 }
 
 FLANKING_3 = {
-    "polydT": "BAAAAAAAAAAAAAAAAAAAAAAAAAAAA*A*A",
+    "polyA": "BAAAAAAAAAAAAAAAAAAAAAAAAAAAA*A*A",
     "Capture1": "NNNNNNNNNGCTTTAAGGCCGGTCCTAGC*A*A",
     "Capture2": "GCTCACCTATTAGCGGCTAA*G*G",
 }
@@ -33,9 +33,9 @@ def gen_flank(provider: Literal["10x", "polyA"], type_: Literal["ADT", "HTO"]) -
 
     elif provider == "polyA":
         if type_ == "ADT":
-            return FLANKING_5["RPI1"], FLANKING_3["polydT"]
+            return FLANKING_5["RPI1"], FLANKING_3["polyA"]
         elif type_ == "HTO":
-            return FLANKING_5["D701"], FLANKING_3["polydT"]
+            return FLANKING_5["D701"], FLANKING_3["polyA"]
         else:
             raise ValueError(f"Unknown type: {type_}")
 
