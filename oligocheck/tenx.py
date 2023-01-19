@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Callable, Literal
 
 from .io import get_whitelist
 
@@ -13,6 +13,7 @@ FLANKING_5 = {
     "RPI1": "CCTTGGCACCCGAGAATTCCA",
     # TruSeq D701_s - Hashtag
     "D701": "GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT",
+    "NexteraTranposase": "GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG",
 }
 
 FLANKING_3 = {
@@ -22,7 +23,9 @@ FLANKING_3 = {
 }
 
 
-def gen_flank(provider: Literal["10x", "polyA"], type_: Literal["ADT", "HTO"]) -> tuple[str, str]:
+def gen_flank(
+    provider: Literal["10x", "polyA", "sci"], type_: Literal["ADT", "HTO"] | None = None
+) -> tuple[str, str]:
     if provider == "10x":
         if type_ == "ADT":
             return FLANKING_5["TruSeq Read 2"], FLANKING_3["Capture1"]
@@ -38,7 +41,8 @@ def gen_flank(provider: Literal["10x", "polyA"], type_: Literal["ADT", "HTO"]) -
             return FLANKING_5["D701"], FLANKING_3["polyA"]
         else:
             raise ValueError(f"Unknown type: {type_}")
-
+    elif provider == "sci":
+        return FLANKING_5["NexteraTranposase"], FLANKING_3["polyA"]
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -57,27 +61,37 @@ def gen_flank(provider: Literal["10x", "polyA"], type_: Literal["ADT", "HTO"]) -
 # (for HTO amplification; i7 index 1)
 # CAAGCAGAAGACGGCATACGAGATCGAGTAATGTGACTGGAGTTCAGACGTGTGCTCTTCCGAT*C*T
 
+# sci-rna-seq3
+# Nextera Transposase Adapters Read 2
+# GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG[10bp-barcode]BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA*A*A
 
-def gen_oligo(idxs: list[int], provider: Literal["10x", "polyA"], type_: Literal["ADT", "HTO"]) -> str:
+
+def default_builder(
+    seq: str,
+    i: int,
+    modification: str = "/5AmMC12/",
+) -> str:
+    return "\t".join([modification + seq])
+
+
+def default_namer(x: str, i: int) -> str:
+    return f"{i}"
+
+
+def gen_oligo(
+    idxs: list[int],
+    *,
+    builder: Callable[[str, int], str] = default_builder,
+    namer: Callable[[str, int], str] = default_namer,
+    provider: Literal["10x", "polyA", "sci"] = "10x",
+    scale: str = "100nm",
+    purification: str = "STD",
+    type_: Literal["ADT", "HTO"] | None = None,
+) -> str:
     f5, f3 = gen_flank(provider, type_)
-
-    def builder(
-        x: str,
-        i: int,
-        *,
-        modification: str = "/5AmMC6/",
-        scale: str = "250nm",
-        purification: str = "HPLC",
-    ) -> str:
-        name = f"AmMC-{provider}-{type_}-{i}"
-        seq = f"{f5}{x}{f3}"
-
-        return "\t".join([name, modification + seq, scale, purification])
-
     if 0 in idxs:
         raise ValueError("This is 1-indexed.")
-    out = "\n".join(builder(whitelist[i - 1], i) for i in idxs)
-    return out
 
-
-# %%
+    seqs = ["\t".join([builder(f"{f5}{whitelist[i-1]}{f3}", i), scale, purification]) for i in idxs]
+    names = [namer(whitelist[i - 1], i) for i in idxs]
+    return "\n".join(["\t".join(x) for x in zip(names, seqs)])
