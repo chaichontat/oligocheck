@@ -1,14 +1,17 @@
 # %%
 import logging
+import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from io import StringIO
+from itertools import chain
 from pathlib import Path
 from typing import Iterable, Literal
 
+import click
 import mygene
 import pandas as pd
 import primer3
@@ -25,8 +28,44 @@ mg = mygene.MyGeneInfo()
 seqs = SeqIO.index("/home/chaichontat/mer/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
 
 
+def slide(x: str, n: int = 20):
+    return [x[i : i + n] for i in range(len(x) - n + 1)]
+
+
 def reverse_complement(seq):
     return seq.translate(str.maketrans("ATCG", "TAGC"))[::-1]
+
+
+def tm(s: str) -> float:
+    """Approximately the same as the results from the MATLAB script"""
+    return primer3.calc_tm(s, mv_conc=300, dv_conc=0, dna_conc=1) + 5
+
+
+formamide_molar = lambda percent: percent * 1000 * 1.13 / 45.04  # noqa: E731  # density / molar mass
+
+
+@dataclass(frozen=True)
+class Stringency:
+    min_tm: float = 47
+    max_tm: float = 52
+    min_gc: float = 35
+    max_gc: float = 65
+    overlap: float = -1
+    hairpin_tm: float = 30
+    unique: bool = True  # to the extent that bowtie2 cannot detect
+
+
+# fmt: off
+@dataclass(frozen=True)
+class Stringencies:
+    # high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=40, filter_quad_c=True)
+    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=20, unique=False)
+    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=30, unique=False)
+    low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
+    high_ol   = Stringency(min_tm=48, min_gc=35, max_gc=65, hairpin_tm=20, unique=False, overlap=15)
+    medium_ol = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=30, unique=False, overlap=15)
+    low_ol    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False, overlap=15)
+# fmt: on
 
 
 @cache
@@ -73,7 +112,10 @@ def hairpin(seq: str, t: float = 47):
 @cache
 def get_seq(eid: str):
     if "." in eid:
-        return str(seqs[eid].seq)  # type: ignore
+        try:
+            return str(seqs[eid].seq)  # type: ignore
+        except KeyError:
+            eid = eid.split(".")[0]
 
     for i in range(20):
         try:
@@ -125,43 +167,12 @@ def transcripts_to_gene(ts: Iterable[str], species="mouse"):
 
 
 # %%
-def tm(s: str) -> float:
-    """Approximately the same as the results from the MATLAB script"""
-    return primer3.calc_tm(s, mv_conc=300, dv_conc=0, dna_conc=1) + 5
-
-
-formamide_molar = lambda percent: percent * 1000 * 1.13 / 45.04  # noqa: E731  # density / molar mass
-
-
-@dataclass(frozen=True)
-class Stringency:
-    min_tm: float = 47
-    max_tm: float = 52
-    min_gc: float = 35
-    max_gc: float = 65
-    overlap: float = -1
-    hairpin_tm: float = 30
-    filter_quad_c: bool = True
-    filter_quad_a: bool = True
-    unique: bool = True  # to the extent that bowtie2 cannot detect
-
-
-# fmt: off
-@dataclass(frozen=True)
-class Stringencies:
-    # high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=40, filter_quad_c=True)
-    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=20, filter_quad_c=True,  unique=False)
-    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=30, filter_quad_c=True,  unique=False)
-    low    = Stringency(min_tm=47, min_gc=35, max_gc=65, hairpin_tm=35, filter_quad_c=True, unique=False, overlap=15)
-    low_ol = Stringency(min_tm=47, min_gc=25, max_gc=70, hairpin_tm=35, filter_quad_c=False, unique=False, overlap=15)
-# fmt: on
-
-# %%
+# GENCODE primary only
 if Path("gencode_vM32_transcripts.parquet").exists():
     everything = pd.read_parquet("gencode_vM32_transcripts.parquet")
 else:
     gencode = pd.read_table(
-        "/home/chaichontat/mer/gencode.vM32.primary_assembly.basic.annotation.gtf",
+        "/home/chaichontat/mer/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
         comment="#",
         sep="\t",
         names=[
@@ -187,7 +198,50 @@ else:
     everything.transcript_id = everything.transcript_id.map(lambda x: x.split(".")[0])
     everything.to_parquet("gencode_vM32_transcripts.parquet")
 
+if not Path("../mm39/rrna.fa").exists():
+    # Get tRNA and rRNA
+    out = []
+    ncrna = SeqIO.parse("../mm39/Mus_musculus.GRCm39.ncrna.fa", "fasta")
+    for line in ncrna:
+        attrs = line.description.split(", ")[0].split(" ")
+        actual = attrs[:7]
+        description = " ".join(attrs[7:])
+        attrs = [":".join(x.split(":")[1:]) if ":" in x else x for x in actual] + [
+            str(line.seq),
+            description,
+        ]
+        if len(attrs) < 8:
+            attrs.append("")
+        out.append(attrs)
 
+    what = [x for x in out if len(x) != 8]
+
+    out = pd.DataFrame.from_records(
+        out,
+        columns=[
+            "transcript_id",
+            "type",
+            "pos",
+            "gene_id",
+            "gene_biotype",
+            "transcript_biotype",
+            "gene_symbol",
+            "seq",
+            "description",
+        ],
+    )
+    with open("../mm39/rrna.fa", "w") as f:
+        for _, row in out[out.gene_biotype == "rRNA"].iterrows():
+            f.write(f">{row.transcript_id}\n{row.seq}\n")
+
+rrnas = set(pd.read_table("../mm39/rrna.fa", header=None)[0].str.split(">", expand=True)[1].dropna())
+
+trna_rna_kmers = set(
+    pd.read_csv("../mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
+)
+
+
+# %%
 # gene = 'Pclaf'
 # stg = 'high'
 def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Path):
@@ -198,6 +252,7 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
             (temp / f"{ts}.fasta").write_text(f">{ts}\n{get_seq(ts.split('_')[1])}")
 
     [(temp / f"{ts}.fastq").unlink(missing_ok=True) for ts in tss]
+    [(temp / f"{ts}.sam").unlink(missing_ok=True) for ts in tss]
 
     with ThreadPoolExecutor() as executor:
         list(
@@ -243,6 +298,10 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
             tss,
         )
 
+    while not all((temp / f"{ts}.sam").exists() for ts in tss):
+        print("Waiting for files to flush to disk...")
+        time.sleep(0.2)
+
 
 def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     grand = []
@@ -277,31 +336,56 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     return grand
 
 
-def filter_specifity(tss_all: Iterable[str], grand: pd.DataFrame, stringency: Stringency, threshold=0.05):
+def filter_specifity(
+    tss_all: Iterable[str],
+    tss_gencode: Iterable[str],
+    grand: pd.DataFrame,
+    stringency: Stringency,
+    threshold=0.05,
+):
     grand["ok"] = False
     grand["nonspecific_binding"] = 0.0
     tsss = set(tss_all)
+    tssg = set(tss_gencode)
 
     grand["ok"] = False
     grand.loc[grand.transcript.isin(tsss), "ok"] = True
+    res = []
 
-    if not stringency.unique:
-        for idx, row in grand[~grand.transcript.isin(tsss)].iterrows():
+    for _, rows in grand.groupby("seq"):
+        # Filter 14-mer rrna/trna
+        if any(x in trna_rna_kmers for x in slide(rows.iloc[0].seq, n=14)):
+            continue
+
+        all_ontarget = rows.transcript.isin(tsss).all()
+        if stringency.unique and not all_ontarget:
+            continue
+
+        nonspecific = 0
+        for _, row in rows.iterrows():
+            if all_ontarget:
+                continue  # No need to test. Cannot break because of else.
+
+            if row.transcript in rrnas or "tRNA" in row.transcript:
+                break
+
+            # Actual nonspecific test
             seq = get_seq(row.transcript)
             ns = nonspecific_test(
                 row.seq,
                 seq[max(0, row.pos - 3) : min(row.pos + len(row.seq) + 3, len(seq))],
                 37,
             )[1]["bound"]
-            grand.loc[idx, ["nonspecific_binding", "ok"]] = (ns, ns < threshold)  # type: ignore
-
-    res = []
-    for _, rows in grand.groupby("seq"):
-        if rows["ok"].all():
-            rows["n_mapped"] = rows[rows.transcript.isin(tsss)].shape[0]
+            if ns > threshold:
+                break
+            nonspecific = max(ns, nonspecific)
+        else:
+            # Counting only GENCODE transcripts
+            rows["n_mapped"] = len(rows[rows.transcript.isin(tssg)])
+            rows["nonspecific_binding"] = nonspecific
             res.append(rows)
 
-    return pd.concat(res).drop(columns=["ok"])
+    return pd.concat(res)
 
 
 def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand=300):
@@ -393,7 +477,7 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 
     block_bowtie(gene, tss_gencode, stringency, temp)
     grand = combine_transcripts(gene, tss_gencode, temp)
-    res = filter_specifity(tss_all, grand, stringency)
+    res = filter_specifity(tss_all, tss_gencode, grand, stringency)
     res = res.drop_duplicates(subset=["seq"], keep="first")
     # picked = filter_candidates(res, stringency)
     picked = calc_thermo(res)
@@ -412,6 +496,20 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
         stringency,
     ).sort_values(by=["transcript", "pos"])
     return m
+
+
+@click.command()
+@click.argument("gene")
+@click.argument("stringency")
+@click.option("--output", "-o", type=click.Path())
+def hello(gene, stringency, output):
+    m = run(gene, stringency)
+    Path(output).mkdir(exist_ok=True, parents=True)
+    m.to_parquet(f"{output}/{gene}_{stringency}.parquet", index=False)
+
+
+if __name__ == "__main__":
+    hello()
 
 
 # %%
