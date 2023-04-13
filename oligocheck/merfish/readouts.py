@@ -6,7 +6,7 @@ import pandas as pd
 import primer3
 from Levenshtein import distance
 
-from oligocheck.utils import reverse_complement
+from oligocheck.sequtils import reverse_complement
 
 
 @cache
@@ -120,7 +120,8 @@ for seq in bridges.iloc[:900].itertuples():
         else:
             if (
                 primer3.calc_hairpin_tm(
-                    gen := "AA" + reverse_complement(cutted) + "TAAAAAAAAAAAAAAAAAAAAAA", **conditions
+                    gen := "AA" + reverse_complement(cutted) + "TAAAAAAAAAAAAAAAAAAAAAA",
+                    **conditions,
                 )
                 <= 0
             ):
@@ -152,7 +153,13 @@ primary_rev = "CAAACTAACCTCCTTCTTCCTCCTTCCA"
 secondary_rev = reverse_complement("TCACATCACACCTCTATCCATTATCAACCAC")
 
 assert min_dist([*selected, *good_primary, *good_secondary], slider=primary_rev) > 4
-assert min_dist([*selected, *good_primary, *good_secondary], slider=reverse_complement(secondary_rev)) > 4
+assert (
+    min_dist(
+        [*selected, *good_primary, *good_secondary],
+        slider=reverse_complement(secondary_rev),
+    )
+    > 4
+)
 
 for s in slide(primary_rev):
     for t in slide(secondary_rev):
@@ -236,7 +243,11 @@ def well_pos():
 
 frs = pd.DataFrame(
     [
-        {"Well Position": well, "Name": f"FinalReadout-{i:02d}", "Sequence": "/5AmMC6/" + seq}
+        {
+            "Well Position": well,
+            "Name": f"FinalReadout-{i:02d}",
+            "Sequence": "/5AmMC6/" + seq,
+        }
         for i, (well, seq) in enumerate(zip(well_pos(), final_readouts[:24]), 1)
     ]
 ).to_excel("final_readouts.xlsx", index=False)

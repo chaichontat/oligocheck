@@ -1,5 +1,5 @@
 from oligocheck.tenx import gen_oligo
-from oligocheck.utils import gen_random_base, pcr, reverse_complement
+from oligocheck.oligocheck.sequtils import gen_random_base, pcr, reverse_complement
 
 truncated_truseq_1 = "CTACACGACGCTCTTCCGATCT"
 cell_bc = lambda: gen_random_base(16)

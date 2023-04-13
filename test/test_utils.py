@@ -1,5 +1,6 @@
 import pytest
-from oligocheck.utils import pcr, reverse_complement
+
+from oligocheck.sequtils import pcr, reverse_complement
 
 
 def test_reverse_complement():

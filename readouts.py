@@ -5,7 +5,7 @@ import pandas as pd
 import primer3
 from Levenshtein import distance
 
-from oligocheck.utils import reverse_complement
+from oligocheck.sequtils import reverse_complement
 
 
 def slide(x: str, n: int = 20) -> list[str]:
@@ -119,7 +119,8 @@ for seq in bridges.iloc[:900].itertuples():
         else:
             if (
                 primer3.calc_hairpin_tm(
-                    gen := "AA" + reverse_complement(cutted) + "TAAAAAAAAAAAAAAAAAAAAAA", **conditions
+                    gen := "AA" + reverse_complement(cutted) + "TAAAAAAAAAAAAAAAAAAAAAA",
+                    **conditions,
                 )
                 <= 0
             ):
@@ -153,7 +154,13 @@ primary_rev = "CAAACTAACCTCCTTCTTCCTCCTTCCAC"
 secondary_rev = reverse_complement("CTCACATCACACCTCTATCCATTATCAACCAC")
 
 assert min_dist([*selected, *good_primary, *good_secondary], slider=primary_rev) > 4
-assert min_dist([*selected, *good_primary, *good_secondary], slider=reverse_complement(secondary_rev)) > 4
+assert (
+    min_dist(
+        [*selected, *good_primary, *good_secondary],
+        slider=reverse_complement(secondary_rev),
+    )
+    > 4
+)
 
 for s in slide(primary_rev):
     for t in slide(secondary_rev):

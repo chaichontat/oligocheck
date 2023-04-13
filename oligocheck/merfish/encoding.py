@@ -1,47 +1,24 @@
 # %%
-import logging
-import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import cache
 from io import StringIO
-from itertools import chain
 from pathlib import Path
 from typing import Iterable, Literal
 
 import click
-import mygene
 import pandas as pd
 import primer3
-import requests
-from Bio import SeqIO
 
-logger = logging.getLogger("nupack")
-logger.propagate = False
-
-from nupack import Model, SetSpec, Strand, Tube, tube_analysis
-from nupack.analysis import Result, TubeResult
-
-mg = mygene.MyGeneInfo()
-seqs = SeqIO.index("/home/chaichontat/mer/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
-
-
-def slide(x: str, n: int = 20):
-    return [x[i : i + n] for i in range(len(x) - n + 1)]
-
-
-def reverse_complement(seq):
-    return seq.translate(str.maketrans("ATCG", "TAGC"))[::-1]
+from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode, get_rrna, get_seq
+from oligocheck.merfish.nnupack import nonspecific_test
+from oligocheck.sequtils import formamide_molar, slide
 
 
 def tm(s: str) -> float:
     """Approximately the same as the results from the MATLAB script"""
     return primer3.calc_tm(s, mv_conc=300, dv_conc=0, dna_conc=1) + 5
-
-
-formamide_molar = lambda percent: percent * 1000 * 1.13 / 45.04  # noqa: E731  # density / molar mass
 
 
 @dataclass(frozen=True)
@@ -52,15 +29,15 @@ class Stringency:
     max_gc: float = 65
     overlap: float = -1
     hairpin_tm: float = 30
-    unique: bool = True  # to the extent that bowtie2 cannot detect
+    unique: bool = False  # to the extent that bowtie2 cannot detect
 
 
 # fmt: off
 @dataclass(frozen=True)
 class Stringencies:
     # high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=40, filter_quad_c=True)
-    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=20, unique=False)
-    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=30, unique=False)
+    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=35, unique=False)
+    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
     low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
     high_ol   = Stringency(min_tm=48, min_gc=35, max_gc=65, hairpin_tm=20, unique=False, overlap=15)
     medium_ol = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=30, unique=False, overlap=15)
@@ -68,176 +45,12 @@ class Stringencies:
 # fmt: on
 
 
-@cache
-def gen_model(
-    t: float,
-    formamide: float = 30,
-    sodium: float = 0.3,
-    magnesium: float = 0.0,
-    **kwargs,
-):
-    return Model(
-        material="dna",
-        celsius=t + formamide * 0.65,
-        sodium=sodium,
-        magnesium=magnesium,
-        **kwargs,
-    )
-
-
-def nonspecific_test(probe: str, seq: str, t: float = 37):
-    model = gen_model(t)
-    probe_ = Strand(reverse_complement("TTT" + probe + "TTT"), "probe")
-    seq_ = Strand(seq, "seq")
-    t1 = Tube(strands={seq_: 1e-10, probe_: 1e-9}, name="t1", complexes=SetSpec(max_size=2))
-    # return tube_analysis(tubes=[t1], compute=["mfe"], model=model)
-    result: Result = tube_analysis(tubes=[t1], compute=["mfe"], model=model)
-    tube_result: TubeResult = result[t1]
-    want = {}
-    for complex, conc in tube_result.complex_concentrations.items():
-        if complex.name == "(probe)":
-            want["hairpin"] = conc / 1e-9
-        elif complex.name == "(probe+seq)" or complex.name == "(seq+probe)":
-            want["bound"] = conc / 1e-10
-        elif complex.name == "(probe+probe)":
-            want["dimer"] = conc / 1e-9
-    return result, want
-
-
-def hairpin(seq: str, t: float = 47):
-    return nonspecific_test(seq, seq, t=t)
-
-
-# %%
-@cache
-def get_seq(eid: str):
-    if "." in eid:
-        try:
-            return str(seqs[eid].seq)  # type: ignore
-        except KeyError:
-            eid = eid.split(".")[0]
-
-    for i in range(20):
-        try:
-            return str(seqs[f"{eid}.{i}"].seq)  # type: ignore
-        except KeyError:
-            ...
-
-    return requests.get(
-        f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
-        headers={"Content-Type": "text/plain"},
-    ).text
-
-
-@cache
-def gene_info(gene: str):
-    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-    return res
-
-
-@cache
-def gene_to_eid(gene: str):
-    return gene_info(gene)["id"]
-
-
-@cache
-def all_transcripts(gene: str):
-    return [t["id"] for t in gene_info(gene)["Transcript"]]
-
-
-@cache
-def gene_to_transcript(gene: str):
-    """Remove . from transcript first"""
-    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-    return {
-        "id": res["id"],
-        "canonical": res["canonical_transcript"],
-        "transcripts": [x["id"] for x in res["Transcript"]],
-        "biotype": [x["biotype"] for x in res["Transcript"]],
-    }
-
-
-def transcripts_to_gene(ts: Iterable[str], species="mouse"):
-    """Remove . from transcript first"""
-    ts = [x.split(".")[0] for x in ts]
-    res = mg.querymany(ts, fields="symbol", scopes="ensembl.transcript,symbol", species=species)
-    return {x["query"]: x["symbol"] for x in res}
-
-
 # %%
 # GENCODE primary only
-if Path("gencode_vM32_transcripts.parquet").exists():
-    everything = pd.read_parquet("gencode_vM32_transcripts.parquet")
-else:
-    gencode = pd.read_table(
-        "/home/chaichontat/mer/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
-        comment="#",
-        sep="\t",
-        names=[
-            "seqname",
-            "source",
-            "feature",
-            "start",
-            "end",
-            "score",
-            "strand",
-            "frame",
-            "attribute",
-        ],
-    )
-    gencode = gencode[gencode.feature.isin(["transcript", "gene"])]
-    gencode.attribute = gencode.attribute.apply(
-        lambda row: dict([map(lambda t: t.replace('"', ""), kv.split(" ")) for kv in row.split("; ")])
-    )
-    trs_only = gencode[gencode.attribute.apply(lambda x: "transcript_id" in x)]
-    everything = pd.DataFrame(trs_only.apply(lambda row: {**row, **row.attribute}, axis=1).to_list())
-    everything = everything.drop(columns=["attribute"])
-    everything.gene_id = everything.gene_id.map(lambda x: x.split(".")[0])
-    everything.transcript_id = everything.transcript_id.map(lambda x: x.split(".")[0])
-    everything.to_parquet("gencode_vM32_transcripts.parquet")
-
-if not Path("../mm39/rrna.fa").exists():
-    # Get tRNA and rRNA
-    out = []
-    ncrna = SeqIO.parse("../mm39/Mus_musculus.GRCm39.ncrna.fa", "fasta")
-    for line in ncrna:
-        attrs = line.description.split(", ")[0].split(" ")
-        actual = attrs[:7]
-        description = " ".join(attrs[7:])
-        attrs = [":".join(x.split(":")[1:]) if ":" in x else x for x in actual] + [
-            str(line.seq),
-            description,
-        ]
-        if len(attrs) < 8:
-            attrs.append("")
-        out.append(attrs)
-
-    what = [x for x in out if len(x) != 8]
-
-    out = pd.DataFrame.from_records(
-        out,
-        columns=[
-            "transcript_id",
-            "type",
-            "pos",
-            "gene_id",
-            "gene_biotype",
-            "transcript_biotype",
-            "gene_symbol",
-            "seq",
-            "description",
-        ],
-    )
-    with open("../mm39/rrna.fa", "w") as f:
-        for _, row in out[out.gene_biotype == "rRNA"].iterrows():
-            f.write(f">{row.transcript_id}\n{row.seq}\n")
-
-rrnas = set(pd.read_table("../mm39/rrna.fa", header=None)[0].str.split(">", expand=True)[1].dropna())
-
+everything = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
+rrnas = get_rrna("data/mm39/rrna.fa")
 trna_rna_kmers = set(
-    pd.read_csv("../mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
+    pd.read_csv("data/mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
 )
 
 
@@ -341,7 +154,7 @@ def filter_specifity(
     tss_gencode: Iterable[str],
     grand: pd.DataFrame,
     stringency: Stringency,
-    threshold=0.05,
+    threshold: float = 0.05,
 ):
     grand["ok"] = False
     grand["nonspecific_binding"] = 0.0
@@ -388,20 +201,20 @@ def filter_specifity(
     return pd.concat(res)
 
 
-def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand=300):
-    if stringency.overlap > 0 or len(res) < n_cand:
-        # Not dropping anything here since we don't have enough.
-        return res
+# def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand: int = 300):
+#     if stringency.overlap > 0 or len(res) < n_cand:
+#         # Not dropping anything here since we don't have enough.
+#         return res
 
-    curr = res.n_mapped.max()
-    picked = pd.DataFrame()
-    # shuffle to get uniform coverage in case we get to n_cand early.
-    while len(picked) < n_cand:
-        shuffled = res[res.n_mapped == curr].sample(frac=1)
-        if len(shuffled) + len(picked) > n_cand:
-            shuffled = shuffled.iloc[: n_cand - len(picked)]
-        picked = pd.concat([picked, shuffled]) if len(picked) else shuffled
-    return picked
+#     curr = res.n_mapped.max()
+#     picked = pd.DataFrame()
+#     # shuffle to get uniform coverage in case we get to n_cand early.
+#     while len(picked) < n_cand:
+#         shuffled = res[res.n_mapped == curr].sample(frac=1)
+#         if len(shuffled) + len(picked) > n_cand:
+#             shuffled = shuffled.iloc[: n_cand - len(picked)]
+#         picked = pd.concat([picked, shuffled]) if len(picked) else shuffled
+#     return picked
 
 
 def calc_thermo(picked: pd.DataFrame):
@@ -430,34 +243,6 @@ def filter_thermo(picked: pd.DataFrame, stringency: Stringency):
     return picked[(picked.hp < stringency.hairpin_tm) & (picked.homodimer < 40)]
 
 
-def handle_overlap(tss: Iterable[str], filtered: pd.DataFrame, stringency: Stringency):
-    selected = set()
-    for ts in tss:
-        nool = sorted(
-            [(r, idx, pos) for idx, r in filtered.iterrows() if (pos := get_seq(ts).find(r.seq)) > -1],
-            key=lambda x: x[2],
-        )
-        curr = min(0, -stringency.overlap)
-        if len(nool[1][0].seq) < stringency.overlap:
-            raise ValueError("Overlap too large")
-        for r, idx, pos in nool:
-            if pos - curr >= 0:
-                selected.add(idx)
-                curr = pos + len(r.seq) - stringency.overlap
-    return filtered.loc[list(selected)]
-
-
-def cSpecStackFilter(seq):
-    for i in range(6):
-        if seq[i : i + 6].count("C") >= 4:
-            return False
-    return True
-
-
-def ACompfilter(seq: str):
-    return seq.count("T") / len(seq) < 0.28
-
-
 # %%
 # stg = "low"
 # gene = "B2m"
@@ -482,34 +267,24 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     # picked = filter_candidates(res, stringency)
     picked = calc_thermo(res)
     picked = filter_thermo(picked, stringency)
-    # https://www.nature.com/articles/s41596-022-00750-2
 
-    picked["ok_quad_c"] = ~picked["seq"].str.contains("GGGG")
-    picked["ok_quad_a"] = ~picked["seq"].str.contains("TTTT")
-    picked["ok_comp_a"] = picked["seq"].map(ACompfilter)
-    picked["ok_stack_c"] = picked["seq"].map(cSpecStackFilter)
-
-    m = handle_overlap(
-        tss_gencode,
-        picked,
-        # picked[picked.ok_quad_c & picked.ok_quad_a & picked.ok_comp_a & picked.ok_stack_c],
-        stringency,
-    ).sort_values(by=["transcript", "pos"])
-    return m
+    return picked.sort_values(by=["transcript", "pos"]).drop(
+        columns=["mapq", "cigar", "flag", "rnext", "pnext", "tlen", "ok"]
+    )
 
 
 @click.command()
 @click.argument("gene")
 @click.argument("stringency")
 @click.option("--output", "-o", type=click.Path())
-def hello(gene, stringency, output):
+def main(gene: str, stringency: str, output: str):
     m = run(gene, stringency)
     Path(output).mkdir(exist_ok=True, parents=True)
     m.to_parquet(f"{output}/{gene}_{stringency}.parquet", index=False)
 
 
 if __name__ == "__main__":
-    hello()
+    main()
 
 
 # %%
@@ -553,6 +328,13 @@ if __name__ == "__main__":
 # %%
 
 
+# %%
+# %%
+# %%
+# %%
+# %%
+# %%
+# %%
 # %%
 # %%
 # %%

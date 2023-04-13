@@ -1,9 +1,11 @@
 [tool.poetry]
-authors = ["Chaichontat Sriworarat <34997334+chaichontat@users.noreply.github.com>"]
+authors = [
+    "Chaichontat Sriworarat <34997334+chaichontat@users.noreply.github.com>",
+]
 description = ""
 license = "GPL v3.0"
 name = "oligocheck"
-packages = [{include = "oligocheck"}]
+packages = [{ include = "oligocheck" }]
 version = "0.0.1"
 
 [build-system]
@@ -45,3 +47,7 @@ log_cli = 1
 # log_cli_level = "DEBUG"
 minversion = "7.0"
 testpaths = ["test"]
+
+# poetry entrypoint
+[tool.poetry.scripts]
+genmer = "oligocheck.merfish.encoding:main"
