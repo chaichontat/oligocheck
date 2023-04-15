@@ -1,3 +1,6 @@
+import fcntl
+import json
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 from typing import Iterable
@@ -8,7 +11,16 @@ import requests
 from Bio import SeqIO
 
 mg = mygene.MyGeneInfo()
-seqs = SeqIO.index("/home/chaichontat/mer/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
+
+seqs = SeqIO.index("/home/chaichontat/mer/oligocheck/data/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
+
+
+@contextmanager
+def lock(path: str):
+    locked_file_descriptor = open(Path(path), "w+")
+    fcntl.lockf(locked_file_descriptor, fcntl.LOCK_EX)
+    yield locked_file_descriptor
+    locked_file_descriptor.close()
 
 
 @cache
@@ -33,9 +45,20 @@ def get_seq(eid: str):
 
 @cache
 def gene_info(gene: str):
-    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-    return res
+    with lock("temp/gene_info.LOCK"):
+        try:
+            file = pd.read_csv("temp/gene_info.csv", index_col=0, header=None, sep="\t")
+        except FileNotFoundError:
+            ...
+        else:
+            if gene in file.index:
+                return json.loads(file.loc[gene, 1])
+
+        link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
+        res = requests.get(link, headers={"Content-Type": "application/json"}).json()
+        with open("temp/gene_info.csv", "a") as f:
+            print(gene, json.dumps(res), sep="\t", file=f)
+        return res
 
 
 @cache
@@ -51,8 +74,7 @@ def all_transcripts(gene: str):
 @cache
 def gene_to_transcript(gene: str):
     """Remove . from transcript first"""
-    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
+    res = gene_info(gene)
     return {
         "id": res["id"],
         "canonical": res["canonical_transcript"],
@@ -71,7 +93,7 @@ def transcripts_to_gene(ts: Iterable[str], species="mouse"):
 def get_gencode(path: str = "gencode_vM32_transcripts.parquet"):
     if not Path(path).exists():
         gencode = pd.read_table(
-            "/home/chaichontat/mer/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
+            "/home/chaichontat/mer/oligocheck/data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
             comment="#",
             sep="\t",
             names=[
@@ -101,10 +123,10 @@ def get_gencode(path: str = "gencode_vM32_transcripts.parquet"):
 
 
 def get_rrna(path: str) -> set[str]:
-    if not Path("../mm39/rrna.fa").exists():
+    if not Path(path).exists():
         # Get tRNA and rRNA
         out = []
-        ncrna = SeqIO.parse("../mm39/Mus_musculus.GRCm39.ncrna.fa", "fasta")
+        ncrna = SeqIO.parse("data/mm39/Mus_musculus.GRCm39.ncrna.fa", "fasta")
         for line in ncrna:
             attrs = line.description.split(", ")[0].split(" ")
             actual = attrs[:7]
@@ -134,5 +156,7 @@ def get_rrna(path: str) -> set[str]:
         with open(path, "w") as f:
             for _, row in out[out.gene_biotype == "rRNA"].iterrows():
                 f.write(f">{row.transcript_id}\n{row.seq}\n")
+
+    return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
 
     return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
