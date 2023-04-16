@@ -1,9 +1,12 @@
 import random
+from io import StringIO
+from pathlib import Path
 from typing import Any
 
 import colorama
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
 from matplotlib.axes import Axes
 
 table = str.maketrans("ACGTacgt", "TGCAtgca")
@@ -81,3 +84,28 @@ def plot_local_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: A
     ax.fill_between(np.arange(len(seq) - window_size + 1), out, **(dict(alpha=0.3) | kwargs))  # type: ignore
     ax.set_ylim(bottom=0, top=1)
     ax.set_ylabel("GC (%)")
+
+
+def parse_sam(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    file_read = [",".join(line.strip().split("\t")[:10]) for line in path.read_text().split("\n")]
+
+    y = pd.read_csv(
+        StringIO("\n".join(file_read)),
+        sep=",",
+        header=None,
+        names=[
+            "name",
+            "flag",
+            "transcript",
+            "pos",
+            "mapq",
+            "cigar",
+            "rnext",
+            "pnext",
+            "tlen",
+            "seq",
+        ],
+    )
+    y.transcript = y.transcript.apply(lambda x: x.split(".")[0])
+    return y

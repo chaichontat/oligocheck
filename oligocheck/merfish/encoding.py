@@ -1,7 +1,9 @@
 # %%
+import logging
+import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -10,10 +12,28 @@ from typing import Iterable, Literal
 import click
 import pandas as pd
 import primer3
+from Bio.Seq import Seq
+from Bio.SeqUtils import MeltingTemp as mt
+from Levenshtein import distance
 
-from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode, get_rrna, get_seq
+from oligocheck.merfish.external_data import (
+    all_transcripts,
+    gene_to_eid,
+    get_gencode,
+    get_rrna,
+    get_seq,
+)
 from oligocheck.merfish.nnupack import nonspecific_test
-from oligocheck.sequtils import formamide_molar, slide
+from oligocheck.sequtils import (
+    formamide_molar,
+    gc_content,
+    parse_sam,
+    reverse_complement,
+    slide,
+)
+
+# logging.basicConfig(level=logging.DEBUG)
+# logging.getLogger().setLevel(logging.DEBUG)
 
 
 def tm(s: str) -> float:
@@ -24,24 +44,22 @@ def tm(s: str) -> float:
 @dataclass(frozen=True)
 class Stringency:
     min_tm: float = 47
-    max_tm: float = 52
+    max_tm: float = 57
     min_gc: float = 35
     max_gc: float = 65
     overlap: float = -1
     hairpin_tm: float = 30
     unique: bool = False  # to the extent that bowtie2 cannot detect
+    max_notok: int = 2
 
 
 # fmt: off
 @dataclass(frozen=True)
 class Stringencies:
     # high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=40, filter_quad_c=True)
-    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=35, unique=False)
-    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
+    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=30, unique=False)
+    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=45, unique=False)
     low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
-    high_ol   = Stringency(min_tm=48, min_gc=35, max_gc=65, hairpin_tm=20, unique=False, overlap=15)
-    medium_ol = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=30, unique=False, overlap=15)
-    low_ol    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False, overlap=15)
 # fmt: on
 
 
@@ -73,7 +91,7 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
                 lambda ts: subprocess.run(
                     [
                         "python",
-                        "blockParse.py",
+                        "oligocheck/merfish/blockParse.py",
                         "-f",
                         (temp / f"{ts}.fasta").as_posix(),
                         "-t",
@@ -104,7 +122,16 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
     with ThreadPoolExecutor() as executor:
         executor.map(
             lambda ts: subprocess.run(
-                f"bowtie2 -x ../mm39/mm39 {(temp / f'{ts}.fastq').as_posix()} -t --no-hd -k 2 --local -D 20 -R 3 -N 1 -L 20 -i C,4 --score-min G,1,4 -S {(temp / f'{ts}.sam').as_posix()}",
+                # --no-hd No SAM header
+                # -k 100 Report up to 100 alignments
+                # -D 20 consecutive seed extension attempts can "fail" before Bowtie 2 moves on
+                # -R 3 the maximum number of times Bowtie 2 will "re-seed" reads with repetitive seeds.
+                # -L 17 seed length
+                # -i C,2 Seed interval, every 2 bp
+                # --score-min G,1,4 f(x) = 1 + 4*ln(read_length)
+                f"bowtie2 -x data/mm39/mm39 {(temp / f'{ts}.fastq').as_posix()} "
+                f"--no-hd -k 100 --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
+                f"-S {(temp / f'{ts}.sam').as_posix()}",
                 shell=True,
                 check=True,
             ),
@@ -116,37 +143,52 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
         time.sleep(0.2)
 
 
+name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
+
+
+def filter_oks(df: pd.DataFrame, max_notok: int = 2):
+    oks = df.columns[df.columns.str.contains("ok_")]
+    df["oks"] = df[oks].sum(axis=1)
+    return df[df.oks > len(oks) - max_notok]
+
+
+def cSpecStackFilter(seq: str):
+    seq = reverse_complement(seq)
+    for i in range(6):
+        if seq[i : i + 6].count("C") >= 4:
+            return False
+    return True
+
+
+def ACompfilter(seq: str):
+    return seq.count("T") / len(seq) < 0.28
+
+
 def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     grand = []
     for ts in [f"{gene}_{ts}" for ts in tss]:
-        file_read = [
-            ",".join(line.strip().split("\t")[:10]) for line in (temp / f"{ts}.sam").read_text().split("\n")
-        ]
-
-        y = pd.read_csv(
-            StringIO("\n".join(file_read)),
-            sep=",",
-            header=None,
-            names=[
-                "name",
-                "flag",
-                "transcript",
-                "pos",
-                "mapq",
-                "cigar",
-                "rnext",
-                "pnext",
-                "tlen",
-                "seq",
-            ],
-        )
-        y.transcript = y.transcript.apply(lambda x: x.split(".")[0])
+        y = parse_sam(temp / f"{ts}.sam")
         if "*" in y.transcript.value_counts().index:
             raise ValueError("Unmapped reads found")
         grand.append(y)
 
-    grand = pd.concat(grand).drop_duplicates(subset=["transcript", "seq"], keep="first")
-    return grand
+    # remove duplicates from different bowtie2 runs to the same transcript
+    grand = pd.concat(grand).drop_duplicates(subset=["name", "transcript"])
+    nameexpand = (
+        grand["name"]
+        .str.split(name_splitter, expand=True)  # type: ignore
+        .drop(columns=[0, 5])
+        .rename(columns={1: "gene", 2: "transcript_ori", 3: "pos_start", 4: "pos_end"})
+        .astype({"pos_start": int, "pos_end": int})
+    )
+    df = pd.concat([grand, nameexpand], axis=1)
+    df["is_ori_seq"] = df["transcript"] == df["transcript_ori"]
+    df["length"] = df["pos_end"] - df["pos_start"] + 1  # pos is inclusive
+    df = df.sort_values(by=["transcript_ori", "pos_start", "transcript"])
+
+    assert (df[df.is_ori_seq].length == df[df.is_ori_seq].seq.map(len)).all()
+    assert not df.isna().any().any()
+    return df
 
 
 def filter_specifity(
@@ -156,48 +198,85 @@ def filter_specifity(
     stringency: Stringency,
     threshold: float = 0.05,
 ):
-    grand["ok"] = False
     grand["nonspecific_binding"] = 0.0
     tsss = set(tss_all)
     tssg = set(tss_gencode)
 
-    grand["ok"] = False
-    grand.loc[grand.transcript.isin(tsss), "ok"] = True
-    res = []
-
-    for _, rows in grand.groupby("seq"):
-        # Filter 14-mer rrna/trna
+    # Filter 14-mer rrna/trna
+    def _filter_specifity(rows: pd.DataFrame):
         if any(x in trna_rna_kmers for x in slide(rows.iloc[0].seq, n=14)):
-            continue
+            return
 
-        all_ontarget = rows.transcript.isin(tsss).all()
-        if stringency.unique and not all_ontarget:
-            continue
-
+        # if stringency.unique and not all_ontarget:
+        #     continue
         nonspecific = 0
+        mapped = set()
         for _, row in rows.iterrows():
-            if all_ontarget:
-                continue  # No need to test. Cannot break because of else.
+            if row["transcript_ori"] == row.transcript:
+                mapped.add(row.transcript)
+                continue  # same transcript as the one designed for
 
             if row.transcript in rrnas or "tRNA" in row.transcript:
+                logging.debug(f"Skipping {_} from trna")
+                break  # dump this sequence
+
+            # Count only GENCODE transcripts but don't freak out if mapped to a diffrent isoform
+            ontarget_gencode = row.transcript in tssg
+            ontarget_any = row.transcript in tsss
+
+            # Assuming that it'll bind to said isoform.
+            if ontarget_gencode:
+                mapped.add(row.transcript)
+                continue
+            elif ontarget_any:
+                continue
+
+            seq = get_seq(row.transcript)
+
+            # To potentially save us some time.
+            if distance(seq[row.pos : row.pos + len(row.seq)], row.seq) < 5:
+                logging.debug(f"Skipping {_} from distance")
                 break
 
-            # Actual nonspecific test
-            seq = get_seq(row.transcript)
             ns = nonspecific_test(
                 row.seq,
                 seq[max(0, row.pos - 3) : min(row.pos + len(row.seq) + 3, len(seq))],
-                37,
+                47,
             )[1]["bound"]
-            if ns > threshold:
-                break
-            nonspecific = max(ns, nonspecific)
-        else:
-            # Counting only GENCODE transcripts
-            rows["n_mapped"] = len(rows[rows.transcript.isin(tssg)])
-            rows["nonspecific_binding"] = nonspecific
-            res.append(rows)
 
+            if ontarget_gencode and ns > 0.8:
+                mapped.add(row.transcript)
+
+            if not ontarget_any and ns < threshold:
+                nonspecific = max(ns, nonspecific)
+
+            if not ontarget_any and ns >= threshold:
+                logging.debug(f"Skipping {_} from offtarget")
+                break
+
+        else:
+            assert len(mapped) > 0
+            rows["n_mapped"] = len(mapped)
+            rows["nonspecific_binding"] = nonspecific
+            logging.debug(f"Keeping {len(rows)}")
+            return rows
+
+    res = []
+    for _, rows in grand.groupby("name"):
+        _ = _filter_specifity(rows)
+        if _ is not None:
+            res.append(_)
+
+    # with ThreadPoolExecutor(6) as executor:
+    #     tosplit = list(grand.groupby("name"))
+    #     # split tosplit uniformly into 6 chunks
+    #     chunks = [tosplit[i::6] for i in range(6)]
+
+    #     futures.append(executor.submit(_filter_specifity, rows))
+    #     for future in as_completed(futures):
+    #         _ = future.result()
+    #         if _ is not None:
+    #             res.append(_)
     return pd.concat(res)
 
 
@@ -217,24 +296,30 @@ def filter_specifity(
 #     return picked
 
 
+def formamide_correction(seq: str, fmd: float = 30) -> float:
+    return (0.453 * (gc_content(seq) / 100.0) - 2.88) * formamide_molar(fmd)
+
+
 def calc_thermo(picked: pd.DataFrame):
     return picked.assign(
         hp=picked["seq"].map(
-            lambda x: primer3.calc_hairpin_tm(x, mv_conc=300, dv_conc=0, dntp_conc=0, dna_conc=1)
-            - 0.65 * 30  # formamide
+            lambda x: primer3.calc_hairpin_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
+            + formamide_correction(x)
         ),
         homodimer=picked["seq"].map(
-            lambda x: primer3.calc_homodimer_tm(x, mv_conc=300, dv_conc=0, dntp_conc=0, dna_conc=1)
-            - 0.65 * 30  # formamide
+            lambda x: primer3.calc_homodimer_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
+            + formamide_correction(x)
         ),
         tm=picked["seq"].map(
-            lambda x: primer3.calc_tm(
-                x,
-                mv_conc=300,
-                dv_conc=0,
-                dna_conc=1,
-                formamide_conc=formamide_molar(0.3),
-            )
+            lambda x: mt.Tm_NN(Seq(x), nn_table=mt.R_DNA_NN1, Na=390, Tris=0, Mg=0, dNTPs=0)
+            + formamide_correction(x)
+            # primer3.calc_tm(
+            #     x,
+            #     mv_conc=300,
+            #     dv_conc=0,
+            #     dna_conc=1,
+            #     formamide_conc=formamide_molar(0.3),
+            # )
         ),
     )
 
@@ -244,15 +329,17 @@ def filter_thermo(picked: pd.DataFrame, stringency: Stringency):
 
 
 # %%
-# stg = "low"
-# gene = "B2m"
+stg = "high"
+gene = "Pclaf"
 
 
 def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     stringency: Stringency = getattr(Stringencies, stg)
 
     eid = gene_to_eid(gene)
-    tss_gencode = tuple(everything[everything.gene_id == eid]["transcript_id"].values)
+    tss_gencode = everything[(everything.gene_id == eid) & everything.transcript_support_level == 1][
+        "transcript_id"
+    ]
     tss_all = all_transcripts(gene)
 
     print(f"Running {gene} with {len(tss_gencode)} transcripts")
@@ -262,15 +349,29 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 
     block_bowtie(gene, tss_gencode, stringency, temp)
     grand = combine_transcripts(gene, tss_gencode, temp)
+    print(f"{gene}: Found {len(grand)} SAM entries")
+
+    grand["ok_quad_c"] = ~grand["seq"].str.contains("GGGG")
+    grand["ok_quad_a"] = ~grand["seq"].str.contains("TTTT")
+    grand["ok_comp_a"] = grand["seq"].map(ACompfilter)
+    grand["ok_stack_c"] = grand["seq"].map(cSpecStackFilter)
+    grand["gc_content"] = grand["seq"].map(gc_content)
+    grand["ok_gc"] = (grand.gc_content >= 0.35) & (grand.gc_content <= 0.65)
+    # grand = filter_oks(grand, stringency.max_notok)
+    print(f"{gene}: Found {len(grand)} SAM entries after filtering")
+
     res = filter_specifity(tss_all, tss_gencode, grand, stringency)
-    res = res.drop_duplicates(subset=["seq"], keep="first")
+    res = res.sort_values(
+        by=["is_ori_seq", "transcript_ori", "pos_start", "transcript"], ascending=[False, True, True, True]
+    ).drop_duplicates(subset=["name"], keep="first")
+
     # picked = filter_candidates(res, stringency)
     picked = calc_thermo(res)
-    picked = filter_thermo(picked, stringency)
+    # picked = filter_thermo(picked, stringency)
+    return picked.drop(columns=["mapq", "cigar", "flag", "rnext", "pnext", "tlen"])
 
-    return picked.sort_values(by=["transcript", "pos"]).drop(
-        columns=["mapq", "cigar", "flag", "rnext", "pnext", "tlen", "ok"]
-    )
+
+# %%
 
 
 @click.command()
@@ -278,7 +379,10 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 @click.argument("stringency")
 @click.option("--output", "-o", type=click.Path())
 def main(gene: str, stringency: str, output: str):
-    m = run(gene, stringency)
+    try:
+        m = run(gene, stringency)
+    except Exception as e:
+        raise Exception(f"Failed to run {gene} with {stringency}") from e
     Path(output).mkdir(exist_ok=True, parents=True)
     m.to_parquet(f"{output}/{gene}_{stringency}.parquet", index=False)
 
@@ -329,16 +433,9 @@ if __name__ == "__main__":
 
 
 # %%
+
+
 # %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
-# %%
+
+
 # %%
