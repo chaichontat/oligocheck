@@ -1,3 +1,4 @@
+# %%
 import random
 import re
 from io import StringIO
@@ -14,6 +15,23 @@ from matplotlib.axes import Axes
 
 table = str.maketrans("ACGTacgt ", "TGCAtgca ")
 name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
+
+c = re.compile(r"(\d+)S(\d+)M")
+c2 = re.compile(r"(\d+)M")
+
+
+def parse_cigar(s: str, m_only: bool = False) -> tuple[int, ...]:
+    if not m_only:
+        try:
+            return tuple(map(int, c.findall(s)[0]))
+        except IndexError:
+            try:
+                return 0, max(map(int, (c2.findall(s))))
+            except ValueError:
+                return 0, 0
+            except IndexError:
+                return 0, 0
+    return tuple(map(int, c2.findall(s)))
 
 
 def printc(seq: str):
@@ -136,3 +154,6 @@ def parse_sam(path: str | Path, split_name: bool = True) -> pd.DataFrame:
     df["is_ori_seq"] = df["transcript"] == df["transcript_ori"]
     df["length"] = df["pos_end"] - df["pos_start"] + 1  # pos is inclusive
     return df
+
+
+# %%

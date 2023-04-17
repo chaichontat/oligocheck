@@ -1,8 +1,10 @@
 # %%
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import click
+import pandas as pd
 
 wants = [
     "Pclaf",
@@ -120,10 +122,15 @@ def runpls(gene: str, stringency: str):
 
 
 @click.command()
+@click.argument("genes_path", type=click.Path(exists=True))
 @click.argument("stringency")
-def hello(stringency: str):
-    with ThreadPoolExecutor(12) as executor:
-        executor.map(runpls, wants, [stringency] * len(wants))
+def hello(genes_path: str, stringency: str):
+    genes: list[str] = pd.read_csv(genes_path, header=None, dtype=str)[0]
+    sr = [gene for gene in genes if not Path(f"output/{gene}_{stringency}.parquet").exists()]
+    print(f"running {len(sr)} genes")
+
+    with ThreadPoolExecutor(8) as executor:
+        executor.map(runpls, sr, [stringency] * len(sr))
 
 
 if __name__ == "__main__":

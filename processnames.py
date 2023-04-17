@@ -461,31 +461,10 @@ for code, gene in zip(codes, selected.gene.unique()):
 out = pd.concat([picked, pd.DataFrame(out)])
 # %%
 
-conditions = dict(
-    mv_conc=300,
-    dv_conc=5,
-    dntp_conc=1,
-    dna_conc=10,
-)
-q5 = dict(dna_conc=500, dv_conc=5, dntp_conc=0.2, mv_conc=300)
-# tosearch = combi.seq.map(lambda x: x[:30]).unique()
-paintshopprimers = ["ps_ir.txt", "ps_if.txt", "ps_or.txt", "ps_of.txt"]
-get_paintshop()
-pps = pd.concat([pd.read_csv(f"data/paintshop/{x}", sep="\t") for x in paintshopprimers])
-tmss = []
-for i, p in enumerate(pps.seq):
-    if "CCC" in p or "GGG" in p:
-        continue
-    tmss.append((i, primer3.calc_tm(p, **q5), p))
-    # for seq in out.seq:
-    #     tms.append(primer3.calc_hairpin_tm(reverse_complement(p) + seq[:30], **conditions))
-    # tmss.append((f"{i}r", max(tms)))
-
-tmss = sorted(tmss, key=lambda x: x[1])
-
-
 # %%
 header = "AGACGTAAGCACCCTAACGC"
+
+
 res = "TATTTCCCTATAGTGAGTCGTATTAG" + "GAGCAGTCACA"
 # %%
 outout = out.copy()

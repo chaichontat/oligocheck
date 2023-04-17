@@ -13,25 +13,22 @@ import pandas as pd
 import primer3
 from Levenshtein import distance
 
-from oligocheck.merfish.external_data import (
-    all_transcripts,
-    gene_to_eid,
-    get_gencode,
-    get_rrna,
-    get_seq,
-)
+from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode, get_rrna, get_seq
 from oligocheck.merfish.nnupack import nonspecific_test
 from oligocheck.sequtils import (
     formamide_correction,
     gc_content,
+    parse_cigar,
     parse_sam,
     reverse_complement,
     slide,
     tm_hybrid,
 )
 
-# logging.basicConfig(level=logging.DEBUG)
-# logging.getLogger().setLevel(logging.DEBUG)
+try:
+    profile
+except NameError:
+    profile = lambda x: x
 
 
 def tm(s: str) -> float:
@@ -73,6 +70,7 @@ trna_rna_kmers = set(
 # %%
 # gene = 'Pclaf'
 # stg = 'high'
+@profile
 def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Path):
     tss = [f"{gene}_{ts}" for ts in tss]
 
@@ -128,7 +126,7 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
                 # -i C,2 Seed interval, every 2 bp
                 # --score-min G,1,4 f(x) = 1 + 4*ln(read_length)
                 f"bowtie2 -x data/mm39/mm39 {(temp / f'{ts}.fastq').as_posix()} "
-                f"--no-hd -a --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
+                f"--no-hd -k 100 --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
                 f"-S {(temp / f'{ts}.sam').as_posix()}",
                 shell=True,
                 check=True,
@@ -162,6 +160,7 @@ def ACompfilter(seq: str):
     return seq.count("T") / len(seq) < 0.28
 
 
+@profile
 def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     grand = []
     for ts in [f"{gene}_{ts}" for ts in tss]:
@@ -179,6 +178,7 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     return df
 
 
+@profile
 def filter_specifity(
     tss_all: Iterable[str],
     grand: pd.DataFrame,
@@ -190,6 +190,7 @@ def filter_specifity(
     tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
 
     # Filter 14-mer rrna/trna
+    @profile
     def _filter_specifity(rows: pd.DataFrame):
         if any(x in trna_rna_kmers for x in slide(rows.iloc[0].seq, n=14)):
             return
@@ -220,13 +221,17 @@ def filter_specifity(
             seq = get_seq(row.transcript)
 
             # To potentially save us some time.
-            if distance(seq[row.pos : row.pos + len(row.seq)], row.seq) < 5:
+            if distance(seq[row.pos_start : row.pos + row.pos_end + 2], row.seq) < 5:
                 logging.debug(f"Skipping {_} from distance")
+                break
+
+            if max(parse_cigar(row.cigar)) > 19:
+                logging.debug(f"Skipping {_} from cigar")
                 break
 
             ns = nonspecific_test(
                 row.seq,
-                seq[max(0, row.pos - 3) : min(row.pos + len(row.seq) + 3, len(seq))],
+                seq[max(0, row.pos - 2) : min(row.pos + len(row.seq) + 2, len(seq))],
                 47,
             )[1]["bound"]
 
@@ -261,6 +266,9 @@ def filter_specifity(
     #         _ = future.result()
     #         if _ is not None:
     #             res.append(_)
+    if not res:
+        print(f"No candidates found for {gene}")
+        return pd.DataFrame()
     return pd.concat(res)
 
 
@@ -280,6 +288,7 @@ def filter_specifity(
 #     return picked
 
 
+@profile
 def calc_thermo(picked: pd.DataFrame):
     return picked.assign(
         hp=picked["seq"].map(
@@ -312,6 +321,7 @@ stg = "high"
 gene = "Pclaf"
 
 
+@profile
 def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     stringency: Stringency = getattr(Stringencies, stg)
 
@@ -340,6 +350,9 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     print(f"{gene}: Found {len(grand)} SAM entries after filtering")
 
     res = filter_specifity(tss_all, grand, tss_gencode=tss_gencode)
+    if not len(res):
+        raise ValueError(f"No candidates found for {gene}")
+    print(f"{gene}: Found {len(res)} probes after specificity filtering")
     res = res.sort_values(
         by=["is_ori_seq", "transcript_ori", "pos_start", "transcript"], ascending=[False, True, True, True]
     ).drop_duplicates(subset=["name"], keep="first")
@@ -357,11 +370,17 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 @click.argument("gene")
 @click.argument("stringency")
 @click.option("--output", "-o", type=click.Path())
-def main(gene: str, stringency: str, output: str):
+@click.option("--debug", "-d", is_flag=True)
+def main(gene: str, stringency: str, output: str = "output/", debug: bool = False):
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+
     try:
         m = run(gene, stringency)
     except Exception as e:
         raise Exception(f"Failed to run {gene} with {stringency}") from e
+
     Path(output).mkdir(exist_ok=True, parents=True)
     m.to_parquet(f"{output}/{gene}_{stringency}.parquet", index=False)
 
@@ -371,10 +390,6 @@ if __name__ == "__main__":
 
 
 # %%
-
-
-# %%
-
 
 # return selected, filtered
 

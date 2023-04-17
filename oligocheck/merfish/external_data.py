@@ -7,12 +7,16 @@ from typing import Iterable
 
 import mygene
 import pandas as pd
+import redis
 import requests
 from Bio import SeqIO
 
 mg = mygene.MyGeneInfo()
 
 seqs = SeqIO.index("/home/chaichontat/mer/oligocheck/data/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
+
+r_seq = redis.Redis(host="localhost", port=6379, db=0)
+r_gene = redis.Redis(host="localhost", port=6379, db=1)
 
 
 @contextmanager
@@ -25,45 +29,77 @@ def lock(path: str):
 
 @cache
 def get_seq(eid: str):
-    if "." in eid:
-        try:
-            return str(seqs[eid].seq)  # type: ignore
-        except KeyError:
-            eid = eid.split(".")[0]
+    try:
+        eid, version = eid.split(".")
+    except ValueError:
+        version = None
 
-    for i in range(20):
+    if (res := r_seq.get(eid)) is not None:
+        return res.decode()
+
+    if version is not None:
         try:
-            return str(seqs[f"{eid}.{i}"].seq)  # type: ignore
+            r_seq.set(eid, res := str(seqs[f"{eid}.{version}"].seq))
+            return res  # type: ignore
         except KeyError:
             ...
 
-    return requests.get(
-        f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
-        headers={"Content-Type": "text/plain"},
-    ).text
+    for i in range(20):
+        try:
+            r_seq.set(eid, res := str(seqs[f"{eid}.{i}"].seq))  # type: ignore
+            return res
+        except KeyError:
+            ...
+
+    r_seq.set(
+        eid,
+        res := requests.get(
+            f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
+            headers={"Content-Type": "text/plain"},
+        ).text,
+    )
+    return res
+
+
+gene_info_df = pd.DataFrame()
 
 
 @cache
 def gene_info(gene: str):
-    with lock("temp/gene_info.LOCK"):
-        try:
-            file = pd.read_csv("temp/gene_info.csv", index_col=0, header=None, sep="\t")
-        except FileNotFoundError:
-            ...
-        else:
-            if gene in file.index:
-                return json.loads(file.loc[gene, 1])
+    if (res := r_gene.get(gene)) is not None:
+        return json.loads(res.decode())
 
-        link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-        res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-        with open("temp/gene_info.csv", "a") as f:
-            print(gene, json.dumps(res), sep="\t", file=f)
+    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
+    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
+    r_gene.set(gene, json.dumps(res))
+    return res
+
+
+@cache
+def eid_info(eid: str):
+    if (res := r_gene.get(eid)) is not None:
+        test = json.loads(res.decode())
+        if "error" not in test:
+            return json.loads(res.decode())
+
+    link = f"https://rest.ensembl.org/lookup/id/{eid}"
+    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
+    if "error" not in res:
+        r_gene.set(eid, json.dumps(res))
         return res
+    raise ValueError(f"{res['error']} for {eid}")
 
 
 @cache
 def gene_to_eid(gene: str):
     return gene_info(gene)["id"]
+
+
+@cache
+def eid_to_gene(eid: str):
+    if eid_info(eid)["biotype"] == "lncRNA":
+        return "lncRNA"
+    return eid_info(eid)["display_name"].split("-")[0]
 
 
 @cache
@@ -158,5 +194,4 @@ def get_rrna(path: str) -> set[str]:
                 f.write(f">{row.transcript_id}\n{row.seq}\n")
 
     return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
-
     return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
