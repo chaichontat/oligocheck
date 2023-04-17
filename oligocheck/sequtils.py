@@ -1,4 +1,5 @@
 import random
+import re
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -7,9 +8,12 @@ import colorama
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+from Bio.Seq import Seq
+from Bio.SeqUtils import MeltingTemp as mt
 from matplotlib.axes import Axes
 
-table = str.maketrans("ACGTacgt", "TGCAtgca")
+table = str.maketrans("ACGTacgt ", "TGCAtgca ")
+name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
 
 
 def printc(seq: str):
@@ -31,6 +35,16 @@ def reverse_complement(seq: str) -> str:
     """Return the reverse complement of a DNA sequence."""
     # https://bioinformatics.stackexchange.com/a/3585
     return seq.translate(table)[::-1]
+
+
+def formamide_correction(seq: str, fmd: float = 30) -> float:
+    return (0.453 * (gc_content(seq) / 100.0) - 2.88) * formamide_molar(fmd)
+
+
+def tm_hybrid(seq: str) -> float:
+    return mt.Tm_NN(Seq(seq), nn_table=mt.R_DNA_NN1, Na=390, Tris=0, Mg=0, dNTPs=0) + formamide_correction(
+        seq
+    )
 
 
 def pcr(seq: str, primer: str, primer_rc: str) -> str:
@@ -86,7 +100,7 @@ def plot_local_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: A
     ax.set_ylabel("GC (%)")
 
 
-def parse_sam(path: str | Path) -> pd.DataFrame:
+def parse_sam(path: str | Path, split_name: bool = True) -> pd.DataFrame:
     path = Path(path)
     file_read = [",".join(line.strip().split("\t")[:10]) for line in path.read_text().split("\n")]
 
@@ -107,5 +121,18 @@ def parse_sam(path: str | Path) -> pd.DataFrame:
             "seq",
         ],
     )
+    if not split_name:
+        return y
+
     y.transcript = y.transcript.apply(lambda x: x.split(".")[0])
-    return y
+    nameexpand = (
+        y["name"]
+        .str.split(name_splitter, expand=True)  # type: ignore
+        .drop(columns=[0, 5])
+        .rename(columns={1: "gene", 2: "transcript_ori", 3: "pos_start", 4: "pos_end"})
+        .astype({"pos_start": int, "pos_end": int})
+    )
+    df = pd.concat([y, nameexpand], axis=1)
+    df["is_ori_seq"] = df["transcript"] == df["transcript_ori"]
+    df["length"] = df["pos_end"] - df["pos_start"] + 1  # pos is inclusive
+    return df

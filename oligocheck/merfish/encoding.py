@@ -3,17 +3,14 @@ import logging
 import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 from typing import Iterable, Literal
 
 import click
 import pandas as pd
 import primer3
-from Bio.Seq import Seq
-from Bio.SeqUtils import MeltingTemp as mt
 from Levenshtein import distance
 
 from oligocheck.merfish.external_data import (
@@ -25,11 +22,12 @@ from oligocheck.merfish.external_data import (
 )
 from oligocheck.merfish.nnupack import nonspecific_test
 from oligocheck.sequtils import (
-    formamide_molar,
+    formamide_correction,
     gc_content,
     parse_sam,
     reverse_complement,
     slide,
+    tm_hybrid,
 )
 
 # logging.basicConfig(level=logging.DEBUG)
@@ -123,14 +121,14 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
         executor.map(
             lambda ts: subprocess.run(
                 # --no-hd No SAM header
-                # -k 100 Report up to 100 alignments
+                # -a report all alignments
                 # -D 20 consecutive seed extension attempts can "fail" before Bowtie 2 moves on
                 # -R 3 the maximum number of times Bowtie 2 will "re-seed" reads with repetitive seeds.
                 # -L 17 seed length
                 # -i C,2 Seed interval, every 2 bp
                 # --score-min G,1,4 f(x) = 1 + 4*ln(read_length)
                 f"bowtie2 -x data/mm39/mm39 {(temp / f'{ts}.fastq').as_posix()} "
-                f"--no-hd -k 100 --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
+                f"--no-hd -a --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
                 f"-S {(temp / f'{ts}.sam').as_posix()}",
                 shell=True,
                 check=True,
@@ -174,17 +172,7 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
 
     # remove duplicates from different bowtie2 runs to the same transcript
     grand = pd.concat(grand).drop_duplicates(subset=["name", "transcript"])
-    nameexpand = (
-        grand["name"]
-        .str.split(name_splitter, expand=True)  # type: ignore
-        .drop(columns=[0, 5])
-        .rename(columns={1: "gene", 2: "transcript_ori", 3: "pos_start", 4: "pos_end"})
-        .astype({"pos_start": int, "pos_end": int})
-    )
-    df = pd.concat([grand, nameexpand], axis=1)
-    df["is_ori_seq"] = df["transcript"] == df["transcript_ori"]
-    df["length"] = df["pos_end"] - df["pos_start"] + 1  # pos is inclusive
-    df = df.sort_values(by=["transcript_ori", "pos_start", "transcript"])
+    df = grand.sort_values(by=["transcript_ori", "pos_start", "transcript"])
 
     assert (df[df.is_ori_seq].length == df[df.is_ori_seq].seq.map(len)).all()
     assert not df.isna().any().any()
@@ -193,14 +181,13 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
 
 def filter_specifity(
     tss_all: Iterable[str],
-    tss_gencode: Iterable[str],
     grand: pd.DataFrame,
-    stringency: Stringency,
+    tss_gencode: Iterable[str] | None = None,
     threshold: float = 0.05,
 ):
     grand["nonspecific_binding"] = 0.0
     tsss = set(tss_all)
-    tssg = set(tss_gencode)
+    tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
 
     # Filter 14-mer rrna/trna
     def _filter_specifity(rows: pd.DataFrame):
@@ -221,11 +208,10 @@ def filter_specifity(
                 break  # dump this sequence
 
             # Count only GENCODE transcripts but don't freak out if mapped to a diffrent isoform
-            ontarget_gencode = row.transcript in tssg
             ontarget_any = row.transcript in tsss
 
-            # Assuming that it'll bind to said isoform.
-            if ontarget_gencode:
+            # Assuming that it'll bind to said isoform to save computation.
+            if tss_gencode is not None and row.transcript in tss_gencode:
                 mapped.add(row.transcript)
                 continue
             elif ontarget_any:
@@ -244,9 +230,6 @@ def filter_specifity(
                 47,
             )[1]["bound"]
 
-            if ontarget_gencode and ns > 0.8:
-                mapped.add(row.transcript)
-
             if not ontarget_any and ns < threshold:
                 nonspecific = max(ns, nonspecific)
 
@@ -255,8 +238,9 @@ def filter_specifity(
                 break
 
         else:
-            assert len(mapped) > 0
-            rows["n_mapped"] = len(mapped)
+            if tss_gencode is not None:
+                assert len(mapped) > 0
+                rows["n_mapped"] = len(mapped)
             rows["nonspecific_binding"] = nonspecific
             logging.debug(f"Keeping {len(rows)}")
             return rows
@@ -296,10 +280,6 @@ def filter_specifity(
 #     return picked
 
 
-def formamide_correction(seq: str, fmd: float = 30) -> float:
-    return (0.453 * (gc_content(seq) / 100.0) - 2.88) * formamide_molar(fmd)
-
-
 def calc_thermo(picked: pd.DataFrame):
     return picked.assign(
         hp=picked["seq"].map(
@@ -311,8 +291,7 @@ def calc_thermo(picked: pd.DataFrame):
             + formamide_correction(x)
         ),
         tm=picked["seq"].map(
-            lambda x: mt.Tm_NN(Seq(x), nn_table=mt.R_DNA_NN1, Na=390, Tris=0, Mg=0, dNTPs=0)
-            + formamide_correction(x)
+            tm_hybrid
             # primer3.calc_tm(
             #     x,
             #     mv_conc=300,
@@ -360,7 +339,7 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     # grand = filter_oks(grand, stringency.max_notok)
     print(f"{gene}: Found {len(grand)} SAM entries after filtering")
 
-    res = filter_specifity(tss_all, tss_gencode, grand, stringency)
+    res = filter_specifity(tss_all, grand, tss_gencode=tss_gencode)
     res = res.sort_values(
         by=["is_ori_seq", "transcript_ori", "pos_start", "transcript"], ascending=[False, True, True, True]
     ).drop_duplicates(subset=["name"], keep="first")
@@ -432,6 +411,13 @@ if __name__ == "__main__":
 # %%
 
 
+# %%
+
+
+# %%
+
+
+# %%
 # %%
 
 

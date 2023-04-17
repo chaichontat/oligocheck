@@ -1,4 +1,4 @@
-#%%
+# %%
 from itertools import combinations, cycle, permutations
 from typing import Any
 
@@ -10,6 +10,8 @@ import primer3
 import seaborn as sns
 from Bio import SeqIO
 from Levenshtein import distance
+
+from oligocheck.io import get_paintshop
 
 df = pd.read_csv("/Users/chaichontat/out.csv")
 
@@ -38,6 +40,8 @@ res = mygene.MyGeneInfo().getgenes(
 fpkm = pd.read_csv("/Users/chaichontat/Downloads/fpkm.tsv", sep="\t")
 fpkm["transcript_id"] = fpkm["transcript_id"].map(lambda x: x.split(".")[0])
 fpkm.set_index("transcript_id", inplace=True)
+
+
 # %%
 def get_fpkm(res: dict[str, Any]):
     out = {}
@@ -231,7 +235,7 @@ norm = mygene.MyGeneInfo().querymany(
 hi = mygene.MyGeneInfo().querymany(
     high_exp, fields="symbol,ensembl.transcript", scopes="symbol", species="mouse"
 )
-#%%
+# %%
 
 
 hisum = {gene: sum(v.values()) for gene, v in get_fpkm(hi).items()}
@@ -349,7 +353,7 @@ def find_gene_name(x: str):
 # Use Pclaf Cenpf Cenpa Hells
 # %%
 ps = pd.read_csv("/Users/chaichontat/Downloads/mm39_refseq_newBalance.tsv", sep="\t", header=None)
-#%%
+# %%
 picked2 = ps[ps[13].isin(["Pclaf", "Hells", "Cux2", "Cpne7", "Rapgefl1"])]
 picked = df[
     df.Gene.isin(
@@ -426,7 +430,7 @@ mhd4_7 = np.array(
 )
 codes = np.apply_along_axis(np.nonzero, axis=1, arr=mhd4_7).squeeze()
 
-#%%
+# %%
 
 code_dict = {i: pick_best(bridges.seq[i]) for i in range(11)}
 code_dict_rev = {i: reverse_complement(pick_best(bridges.seq[i])) for i in range(11)}
@@ -437,7 +441,7 @@ selected = ps[ps[13].isin(mygenes)][[13, 3]].rename(columns={13: "gene", 3: "seq
 selected.loc[(selected.gene == "Cux2") & (selected.index % 2), "gene"] = "Cux2_1"
 selected.loc[(selected.gene == "Cux2") & ~(selected.index % 2), "gene"] = "Cux2_2"
 
-#%%
+# %%
 
 out = []
 for code, gene in zip(codes, selected.gene.unique()):
@@ -456,21 +460,23 @@ for code, gene in zip(codes, selected.gene.unique()):
         count += 1
 out = pd.concat([picked, pd.DataFrame(out)])
 # %%
+
 conditions = dict(
     mv_conc=300,
-    dv_conc=0,
-    dntp_conc=0,
-    dna_conc=5,
+    dv_conc=5,
+    dntp_conc=1,
+    dna_conc=10,
 )
+q5 = dict(dna_conc=500, dv_conc=5, dntp_conc=0.2, mv_conc=300)
 # tosearch = combi.seq.map(lambda x: x[:30]).unique()
-paintshopprimers = ["ps_ir.tsv", "ps_if.tsv", "ps_or.tsv", "ps_of.tsv"]
-pps = pd.concat([pd.read_csv(f"/Users/chaichontat/Downloads/{x}", sep="\t") for x in paintshopprimers])
+paintshopprimers = ["ps_ir.txt", "ps_if.txt", "ps_or.txt", "ps_of.txt"]
+get_paintshop()
+pps = pd.concat([pd.read_csv(f"data/paintshop/{x}", sep="\t") for x in paintshopprimers])
 tmss = []
 for i, p in enumerate(pps.seq):
-    tms = []
-    for seq in out.seq:
-        tms.append(primer3.calc_hairpin_tm(p + seq[:30], **conditions))
-    tmss.append((i, max(tms)))
+    if "CCC" in p or "GGG" in p:
+        continue
+    tmss.append((i, primer3.calc_tm(p, **q5), p))
     # for seq in out.seq:
     #     tms.append(primer3.calc_hairpin_tm(reverse_complement(p) + seq[:30], **conditions))
     # tmss.append((f"{i}r", max(tms)))

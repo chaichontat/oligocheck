@@ -88,7 +88,7 @@ assert min_dist([*good_primary, *good_secondary]) > 5
 
 
 conditions = dict(
-    mv_conc=300,
+    mv_conc=390,
     dv_conc=0,
     dntp_conc=0,
     dna_conc=3,
