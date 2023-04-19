@@ -6,6 +6,7 @@ import pandas as pd
 import primer3
 from Levenshtein import distance
 
+from oligocheck.merfish.constants import SP6
 from oligocheck.sequtils import reverse_complement
 
 
@@ -65,12 +66,12 @@ GAATGGAGGGTTAGAGGTAA TT GAATGGAGGGTTAGAGGTAA TT GAATGGAGGGTTAGAGGTAA TT GAATGGAG
 TGGGATAGTATGTGGAAAGT AA TGGGATAGTATGTGGAAAGT AA TGGGATAGTATGTGGAAAGT AA TGGGATAGTATGTGGAAAGT AA TGGGATAGTATGTGGAAAGT AA TGGTAGTAGTGGGTTTGGTT
 AGTTGGGTATGGAGAAAGGT AT AGTTGGGTATGGAGAAAGGT AT AGTTGGGTATGGAGAAAGGT AT AGTTGGGTATGGAGAAAGGT AT AGTTGGGTATGGAGAAAGGT AT GAGTTGGGTTTAGTTGGGTA""".splitlines()
 
-
+# Binds to earlier stage on 3'
 zeroth = [p[-20:] for p in primary_raw]
 primary = [p[:20] for p in primary_raw]
 secondary = [reverse_complement(s[:20]) for s in secondary_raw]
-
 assert all([reverse_complement(p) == s[-20:] for p, s in zip(primary, secondary_raw)])
+
 
 # %%
 # Filter out anything with Levenshtein distance < 6
@@ -81,7 +82,7 @@ for i in range(1, len(primary)):
         good_secondary.append(secondary[i])
 
 assert min_dist([*good_primary, *good_secondary]) > 5
-
+assert len(good_primary) == len(good_secondary)
 # %%
 # Reserved
 # Full length from 900 onwards.
@@ -148,7 +149,7 @@ for seq in bridges.iloc[900:].itertuples():
 # %%
 sorted(list(zip(ok, map(primer3.calc_tm, ok))), key=lambda x: x[1])
 # %%
-sp6 = reverse_complement("ACGTGACTGCTCCATTTAGGTGACACTATAG")
+sp6 = reverse_complement("ACGTGACTGCTCC" + SP6)
 primary_rev = "CAAACTAACCTCCTTCTTCCTCCTTCCA"
 secondary_rev = reverse_complement("TCACATCACACCTCTATCCATTATCAACCAC")
 
@@ -162,10 +163,8 @@ assert (
 )
 
 for s in slide(primary_rev):
-    for t in slide(secondary_rev):
+    for t in slide(reverse_complement(secondary_rev)):
         assert distance(s, t) > 4
-
-# %%
 
 
 # %%
@@ -186,7 +185,7 @@ def gen_amp(base: str, seq: str, reps: int = 5, rc: bool = False) -> str:
     return out + base
 
 
-n = 40
+n = 48
 
 zeroth_readouts = pd.DataFrame([{"name": f"Readout-{i:03d}-v2", "seq": selected[i]} for i in range(1, n + 1)])
 
@@ -206,12 +205,26 @@ assert min_dist([p.split(" ")[1] for p in primaries]) > 5
 for p, s in zip(primaries, secondaries):
     assert p.split(" ")[1] == reverse_complement(s.split(" ")[-2])
 
-final_readouts = good_secondary + [selected[i + 600] for i in range(existing_amp + 1, n + 1)]
-assert all(reverse_complement(s.split(" ")[1]) == fr for s, fr in zip(secondaries, final_readouts))
+secondaries_readout = good_secondary + [selected[i + 600] for i in range(existing_amp + 1, n + 1)]
 
-df_p = pd.DataFrame([{"Pool name": "Primary amplifiers", "Sequence": p} for p in primaries])
-df_s = pd.DataFrame([{"Pool name": "Secondary amplifiers", "Sequence": s} for s in secondaries])
+assert all(p.split(" ")[-2] == selected[i] for i, p in enumerate(primaries, 1))
+assert all(reverse_complement(p.split(" ")[1]) == s.split(" ")[-2] for p, s in zip(primaries, secondaries))
+assert all(reverse_complement(s.split(" ")[1]) == fr for s, fr in zip(secondaries, secondaries_readout))
+
+df_p = pd.DataFrame([{"Pool name": "PrimaryAmplifiers2", "Sequence": p} for p in primaries])
+df_s = pd.DataFrame([{"Pool name": "SecondaryAmplifiers2", "Sequence": s} for s in secondaries])
 out = pd.concat([df_p, df_s])
+
+out.to_excel("opools.xlsx", index=False)
+
+# Check that header is correct.
+assert all(["C" in "".join(p.split(" ")[1:-1]) for p in primaries])
+assert all(["G" not in "".join(p.split(" ")[1:-1]) for p in primaries])
+assert all(["C" not in "".join(s.split(" ")[1:-1]) for s in secondaries])
+assert all(["G" in "".join(s.split(" ")[1:-1]) for s in secondaries])
+
+assert all([len(p) - reverse_complement(p).find(SP6) > 100 for p in primaries])
+assert all([len(s) - reverse_complement(s).find(SP6) > 100 for s in secondaries])
 
 
 # %%
@@ -243,16 +256,12 @@ def well_pos():
 
 frs = pd.DataFrame(
     [
-        {
-            "Well Position": well,
-            "Name": f"FinalReadout-{i:02d}",
-            "Sequence": "/5AmMC6/" + seq,
-        }
-        for i, (well, seq) in enumerate(zip(well_pos(), final_readouts[:24]), 1)
+        {"Well Position": well, "Name": f"FinalReadout-{i:02d}", "Sequence": "/5AmMC6/" + seq}
+        for i, (well, seq) in enumerate(zip(well_pos(), secondaries_readout[:24]), 1)
     ]
 ).to_excel("final_readouts.xlsx", index=False)
 #
-for i, fr in enumerate(final_readouts, 1):
+for i, fr in enumerate(secondaries_readout, 1):
     print(f"FinalReadout-{i:02d}\t/5AmMC6/{fr}\t100nm\tSTD")
 print()
 

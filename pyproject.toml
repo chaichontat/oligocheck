@@ -22,7 +22,6 @@ line-length = 110
 target-version = ['py310']
 
 [tool.pyright]
-include = ["oligocheck"]
 pythonVersion = "3.10"
 reportMissingTypeStubs = false
 reportPrivateUsage = false
@@ -39,7 +38,6 @@ typeCheckingMode = "strict"
 line_length = 110
 profile = "black"
 py_version = 310
-src_paths = ["oligocheck"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=loopy --cov-report=html --cov-report=xml"
