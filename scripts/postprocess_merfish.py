@@ -1,9 +1,7 @@
 # %%
-
-
-import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from functools import reduce
 from itertools import cycle, permutations
 from typing import Iterable
 
@@ -11,16 +9,9 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
-from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode, get_seq
+from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode
 from oligocheck.merfish.filtration import the_filter
-from oligocheck.sequtils import (
-    equal_distance,
-    parse_cigar,
-    parse_sam,
-    plot_local_gc_content,
-    reverse_complement,
-    tm_hybrid,
-)
+from oligocheck.sequtils import equal_distance, parse_cigar, parse_sam, reverse_complement, tm_hybrid
 
 wants = pd.read_csv("tricyclegenes.csv", header=None)[0]
 
@@ -319,17 +310,29 @@ for i, rows in joined[~joined.horrible_tm].groupby("gene"):
     # sortd["constructed"] += "TATAGTGAGTCGTATTAGACCGGTCT"  # ps_ir49
     finale.append(sortd)
 finale = pd.concat(finale)
+finale = finale.astype(dict(code1=int, code2=int, code3=int, code4=int))
 finale.to_csv("tricycle_probes.csv")
-# %%
+
 # %%
 t7 = reverse_complement("TAATACGACTCACTATAGGG")
 
 assert all(finale.constructed.str.find(t7) != -1)
 
-for i, rows in finale.groupby("gene"):
-    codes = [*rows.code1.unique(), *rows.code2.unique(), *rows.code3.unique(), *rows.code4.unique()]
-    assert len(set(codes)) == 4
+codes = set()
+for i, row in finale.groupby("gene")[["code1", "code2", "code3", "code4"]].agg(["unique"]).iterrows():
+    assert len(row) == 4
+    gene_code = tuple(sorted(reduce(lambda x, y: x & y, map(set, row.values))))
+    codes.add(gene_code)
+
+assert len(codes) == finale.groupby("gene").count().shape[0]
+
 
 # %%
 count_genes(finale)
 # %%
+# %%# %%
+
+# %%
+count_genes(finale)
+# %%
+# %%# %%
