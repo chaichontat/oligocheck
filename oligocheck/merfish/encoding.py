@@ -369,9 +369,9 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 @click.command()
 @click.argument("gene")
 @click.argument("stringency")
-@click.option("--output", "-o", type=click.Path())
+@click.option("--output", "-o", type=click.Path(), default="output/")
 @click.option("--debug", "-d", is_flag=True)
-def main(gene: str, stringency: str, output: str = "output/", debug: bool = False):
+def main(gene: str, stringency: str, output: str | Path = "output/", debug: bool = False):
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
