@@ -7,13 +7,13 @@ from typing import Iterable
 
 import mygene
 import pandas as pd
+import pyfastx
 import redis
 import requests
 from Bio import SeqIO
 
 mg = mygene.MyGeneInfo()
-
-seqs = SeqIO.index("/home/chaichontat/mer/oligocheck/data/mm39/Mus_musculus.GRCm39.cdna.all.fa", "fasta")
+fa = pyfastx.Fasta("data/mm39/combi.fa", key_func=lambda x: x.split(" ")[0].split(".")[0])
 
 r_seq = redis.Redis(host="localhost", port=6379, db=0)
 r_gene = redis.Redis(host="localhost", port=6379, db=1)
@@ -28,40 +28,34 @@ def lock(path: str):
 
 
 @cache
-def get_seq(eid: str):
-    try:
-        eid, version = eid.split(".")
-    except ValueError:
-        version = None
+def get_seq(eid: str) -> str:
+    return fa[eid.split(".")[0]].seq
 
-    if (res := r_seq.get(eid)) is not None:
-        return res.decode()
+    # if (res := r_seq.get(eid)) is not None:
+    #     return res.decode()
 
-    if version is not None:
-        try:
-            r_seq.set(eid, res := str(seqs[f"{eid}.{version}"].seq))
-            return res  # type: ignore
-        except KeyError:
-            ...
+    # if version is not None:
+    #     try:
+    #         r_seq.set(eid, res := str(seqs[f"{eid}.{version}"].seq))
+    #         return res  # type: ignore
+    #     except KeyError:
+    #         ...
 
-    for i in range(20):
-        try:
-            r_seq.set(eid, res := str(seqs[f"{eid}.{i}"].seq))  # type: ignore
-            return res
-        except KeyError:
-            ...
+    # for i in range(20):
+    #     try:
+    #         r_seq.set(eid, res := str(seqs[f"{eid}.{i}"].seq))  # type: ignore
+    #         return res
+    #     except KeyError:
+    #         ...
 
-    r_seq.set(
-        eid,
-        res := requests.get(
-            f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
-            headers={"Content-Type": "text/plain"},
-        ).text,
-    )
-    return res
-
-
-gene_info_df = pd.DataFrame()
+    # r_seq.set(
+    #     eid,
+    #     res := requests.get(
+    #         f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
+    #         headers={"Content-Type": "text/plain"},
+    #     ).text,
+    # )
+    # return res
 
 
 @cache
@@ -95,11 +89,16 @@ def gene_to_eid(gene: str):
     return gene_info(gene)["id"]
 
 
-@cache
-def eid_to_gene(eid: str):
-    if eid_info(eid)["biotype"] == "lncRNA":
-        return "lncRNA"
-    return eid_info(eid)["display_name"].split("-")[0]
+def gen_eid_to_ts(gtf: pd.DataFrame):
+    @cache
+    def inner(eid: str) -> str:
+        eid = eid.split(".")[0]
+        row = gtf.loc[eid]
+        if row["transcript_name"]:
+            return row["transcript_name"]
+        return row["gene_id"]
+
+    return inner
 
 
 @cache
@@ -126,36 +125,59 @@ def transcripts_to_gene(ts: Iterable[str], species="mouse"):
     return {x["query"]: x["symbol"] for x in res}
 
 
+def parse_gtf(path: str | Path) -> pd.DataFrame:
+    gencode = pd.read_table(
+        path,
+        comment="#",
+        sep="\t",
+        names=[
+            "seqname",
+            "source",
+            "feature",
+            "start",
+            "end",
+            "score",
+            "strand",
+            "frame",
+            "attribute",
+        ],
+        dtype=dict(
+            seqname=str,
+            source=str,
+            feature=str,
+            start=int,
+            end=int,
+            score=str,
+            strand=str,
+            frame=str,
+            attribute=str,
+        ),
+    )
+    gencode = gencode[gencode.feature.isin(["transcript", "gene"])]
+    gencode["attribute"] = gencode.attribute.apply(
+        lambda row: dict(kv.strip().replace('"', "").split(" ", maxsplit=1) for kv in row.split(";") if kv)
+    )
+    trs_only = gencode[gencode["attribute"].apply(lambda x: "transcript_id" in x)]
+    everything = pd.DataFrame(trs_only.apply(lambda row: {**row, **row.attribute}, axis=1).to_list()).drop(
+        columns=["attribute"]
+    )
+    everything["gene_id"] = everything.gene_id.map(lambda x: x.split(".")[0])
+    everything["transcript_id"] = everything.transcript_id.map(lambda x: x.split(".")[0])
+    return everything
+
+
 def get_gencode(path: str = "gencode_vM32_transcripts.parquet"):
     if not Path(path).exists():
-        gencode = pd.read_table(
-            "/home/chaichontat/mer/oligocheck/data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
-            comment="#",
-            sep="\t",
-            names=[
-                "seqname",
-                "source",
-                "feature",
-                "start",
-                "end",
-                "score",
-                "strand",
-                "frame",
-                "attribute",
-            ],
-        )
-        gencode = gencode[gencode.feature.isin(["transcript", "gene"])]
-        gencode.attribute = gencode.attribute.apply(
-            lambda row: dict([map(lambda t: t.replace('"', ""), kv.split(" ")) for kv in row.split("; ")])
-        )
-        trs_only = gencode[gencode.attribute.apply(lambda x: "transcript_id" in x)]
-        everything = pd.DataFrame(trs_only.apply(lambda row: {**row, **row.attribute}, axis=1).to_list())
-        everything = everything.drop(columns=["attribute"])
-        everything.gene_id = everything.gene_id.map(lambda x: x.split(".")[0])
-        everything.transcript_id = everything.transcript_id.map(lambda x: x.split(".")[0])
-        everything.to_parquet("gencode_vM32_transcripts.parquet")
+        everything = parse_gtf("data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf")
+        everything.to_parquet(path)
+    return pd.read_parquet(path).set_index("transcript_id")
 
-    return pd.read_parquet(path)
+
+def get_ensembl_gtf(path: str = "ensembl_gtf.parquet"):
+    if not Path(path).exists():
+        everything = parse_gtf("data/mm39/Mus_musculus.GRCm39.109.gtf")
+        everything.to_parquet(path)
+    return pd.read_parquet(path).set_index("transcript_id")
 
 
 def get_rrna(path: str) -> set[str]:
@@ -193,5 +215,4 @@ def get_rrna(path: str) -> set[str]:
             for _, row in out[out.gene_biotype == "rRNA"].iterrows():
                 f.write(f">{row.transcript_id}\n{row.seq}\n")
 
-    return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
     return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())

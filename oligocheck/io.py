@@ -27,7 +27,8 @@ def download(url: str, path: str | Path | None = None, return_bytes: bool = Fals
         if path is None:
             return r.content if return_bytes else r.text
         path = Path(path)
-        with open(path / url.split("/")[-1], "wb") as f:
+        path.mkdir(parents=True, exist_ok=True)
+        with open(path / url.split("/")[-1].split("?")[0], "wb") as f:
             shutil.copyfileobj(r.raw, f)
 
 

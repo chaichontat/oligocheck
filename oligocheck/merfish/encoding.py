@@ -13,7 +13,15 @@ import pandas as pd
 import primer3
 from Levenshtein import distance
 
-from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode, get_rrna, get_seq
+from oligocheck.merfish.external_data import (
+    all_transcripts,
+    gen_eid_to_ts,
+    gene_to_eid,
+    get_ensembl_gtf,
+    get_gencode,
+    get_rrna,
+    get_seq,
+)
 from oligocheck.merfish.nnupack import nonspecific_test
 from oligocheck.sequtils import (
     formamide_correction,
@@ -60,11 +68,14 @@ class Stringencies:
 
 # %%
 # GENCODE primary only
-everything = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
+gtf = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
+gtf_all = get_ensembl_gtf("data/mm39/ensembl.parquet")
+# .set_index("transcript_id")
 rrnas = get_rrna("data/mm39/rrna.fa")
 trna_rna_kmers = set(
     pd.read_csv("data/mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
 )
+eid_to_ts = gen_eid_to_ts(gtf_all)
 
 
 # %%
@@ -175,19 +186,44 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
 
     assert (df[df.is_ori_seq].length == df[df.is_ori_seq].seq.map(len)).all()
     assert not df.isna().any().any()
+    print(df.columns)
     return df
 
 
 @profile
 def filter_specifity(
+    gene: str,
     tss_all: Iterable[str],
     grand: pd.DataFrame,
     tss_gencode: Iterable[str] | None = None,
     threshold: float = 0.05,
+    allow_pseudogene: bool = False,
 ):
     grand["nonspecific_binding"] = 0.0
     tsss = set(tss_all)
     tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
+
+    if allow_pseudogene:
+        fpkm = pd.read_parquet("data/fpkm/P0_combi.parquet")
+        counts = (
+            grand["transcript"]
+            .value_counts()
+            .sort_values(ascending=False)
+            .to_frame("count")
+            .join(fpkm)
+            .join(gtf_all[["transcript_name"]])
+        )
+        ok = counts[
+            (counts["count"] > 0.1 * counts["count"].max())
+            & (counts["FPKM"] < 0.05 * counts["FPKM"].max())
+            & (
+                counts["transcript_name"].str.startswith(gene)
+                | counts["transcript_name"].str.startswith("Gm")
+            )
+        ]
+        logging.debug(counts.iloc[:50].to_string())
+        logging.debug(f"Including {', '.join(ok['transcript_name'].values)}.")
+        tsss.update(ok.index)
 
     # Filter 14-mer rrna/trna
     @profile
@@ -222,11 +258,11 @@ def filter_specifity(
 
             # To potentially save us some time.
             if distance(seq[row.pos_start : row.pos + row.pos_end + 2], row.seq) < 5:
-                logging.debug(f"Skipping {_} from distance")
+                # logging.debug(f"Skipping {_} from distance")
                 break
 
             if max(parse_cigar(row.cigar)) > 19:
-                logging.debug(f"Skipping {_} from cigar")
+                # logging.debug(f"Skipping {_} from cigar")
                 break
 
             ns = nonspecific_test(
@@ -326,9 +362,7 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     stringency: Stringency = getattr(Stringencies, stg)
 
     eid = gene_to_eid(gene)
-    tss_gencode = everything[(everything.gene_id == eid) & everything.transcript_support_level == 1][
-        "transcript_id"
-    ]
+    tss_gencode = gtf[(gtf.gene_id == eid) & gtf.transcript_support_level == 1].index
     tss_all = all_transcripts(gene)
 
     print(f"Running {gene} with {len(tss_gencode)} transcripts")
@@ -346,10 +380,11 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     grand["ok_stack_c"] = grand["seq"].map(cSpecStackFilter)
     grand["gc_content"] = grand["seq"].map(gc_content)
     grand["ok_gc"] = (grand.gc_content >= 0.35) & (grand.gc_content <= 0.65)
+    grand["transcript_name"] = grand["transcript"].map(eid_to_ts)
     # grand = filter_oks(grand, stringency.max_notok)
     print(f"{gene}: Found {len(grand)} SAM entries after filtering")
 
-    res = filter_specifity(tss_all, grand, tss_gencode=tss_gencode)
+    res = filter_specifity(gene, tss_all, grand, tss_gencode=tss_gencode, allow_pseudogene=True)
     if not len(res):
         raise ValueError(f"No candidates found for {gene}")
     print(f"{gene}: Found {len(res)} probes after specificity filtering")

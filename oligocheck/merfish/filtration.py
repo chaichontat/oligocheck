@@ -18,7 +18,7 @@ def handle_overlap(
         by=["is_ori_seq", "transcript_ori", "pos_start", "tm"], ascending=[False, True, True, False]
     )
     eid = gene_to_eid(filtered.gene.iloc[0])
-    tss = tuple(everything[everything.gene_id == eid]["transcript_id"].values)
+    tss = tuple(everything[everything.gene_id == eid].index)
     if not criteria:
         criteria = [lambda _: True]
 
