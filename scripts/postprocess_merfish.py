@@ -8,107 +8,152 @@ from typing import Iterable
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import polars as pl
 
 from oligocheck.merfish.external_data import all_transcripts, gene_to_eid, get_gencode
-from oligocheck.merfish.filtration import the_filter
+
+# from oligocheck.merfish.filtration import the_filter
 from oligocheck.sequtils import equal_distance, parse_cigar, parse_sam, reverse_complement, tm_hybrid
 
-wants = pd.read_csv("tricyclegenes.csv", header=None)[0]
+wants = ["Pcna", "Eef2"]
+# wants = ["Eef2"]
 
 
-def count_genes(df: pd.DataFrame) -> pd.Series:
-    if "gene" not in df.columns:
-        df["gene"] = df["name"].apply(lambda x: x.split("_")[0])
-    return df.groupby("gene")["gene"].count().sort_values(ascending=False)
+def count_genes(df: pl.DataFrame) -> pl.DataFrame:
+    return df.groupby("gene").count().sort("count")
 
 
-def filter_gene(df: pd.DataFrame, gene: str) -> pd.DataFrame:
-    return df[df["gene"] == gene]
+def filter_gene(df: pl.DataFrame, gene: str) -> pl.DataFrame:
+    return df.filter(pl.col("gene") == gene)
 
 
-def handle_done(df: pd.DataFrame, target: int = 40):
-    if len(df) < target:
-        return df
-    picked = df.sort_values(by="pos", ascending=False)
-    return picked.iloc[equal_distance(len(picked), target)]
+# def handle_done(df: p.DataFrame, target: int = 40):
+#     if len(df) < target:
+#         return df
+#     picked = df.sort_values(by="pos", ascending=False)
+#     return picked.iloc[equal_distance(len(picked), target)]
 
 
 everything = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
-
-
-def count_oks(df: pd.DataFrame, max_notok: int = 2):
-    total_oks = len(df.columns[df.columns.str.contains("ok_")])
-    oks = df.columns[df.columns.str.contains("ok_")]
-    df["oks"] = df[oks].sum(axis=1)
-    return df[df.oks > total_oks - max_notok]
-
 
 # %%
 temp = []
 for gene in wants:
     try:
-        temp.append(pd.read_parquet(f"output/{gene}_medium.parquet"))
+        temp.append(pl.read_parquet(f"output/{gene}_medium.parquet"))
     except FileNotFoundError:
         print("File not found", gene)
 
-df = pd.concat(temp)
-total_oks = len(df.columns[df.columns.str.contains("ok_")])
-oks = df.columns[df.columns.str.contains("ok_")]
-df["oks"] = df[oks].sum(axis=1)
-# df = mark_ok(df)
+df = pl.concat(temp)
+df = df.with_columns(
+    [
+        pl.sum(pl.col("^ok_.*$")).alias("oks"),
+    ]
+)
+total_oks = len(list(filter(lambda x: x.startswith("ok_"), df.columns)))
+
+
+def handle(df: pl.DataFrame, gene: str, criteria: list[pl.Expr], overlap: int = -1, n: int = 200):
+    if len(df.select(pl.col("gene").unique())) > 1:
+        raise ValueError("More than one gene in filtered")
+    df = df.sort(
+        by=["is_ori_seq", "transcript_ori", "pos_start", "tm"], descending=[True, False, False, True]
+    )
+    eid = gene_to_eid(gene)
+    tss = tuple(everything[everything.gene_id == eid].index)
+
+    if not criteria:
+        criteria = [pl.all("*")]
+
+    df = df.with_columns(
+        [
+            pl.lit(0, dtype=pl.UInt8).alias("priority"),
+            pl.arange(0, len(df), dtype=pl.UInt32).alias("index"),
+        ]
+    )
+    selected = set()
+
+    for ts in tss:
+        this_transcript = df.filter(pl.col("transcript_ori") == ts)
+        if len(this_transcript) == 0:
+            print("No match found for", ts)
+            continue
+
+        forbidden = np.zeros(df.select(pl.col("pos_end")).max().item() + 1 + max(0, overlap), dtype=bool)
+        priority = 1
+        for criterion in criteria:
+            if len(selected) >= n:
+                break
+            for idx, st, end in (
+                df.filter(criterion & ~pl.col("index").is_in(selected))
+                .select(["index", "pos_start", "pos_end"])
+                .iter_rows()
+            ):
+                if np.any(forbidden[st - 1 : end + 1 - overlap]):
+                    continue
+                selected.add(idx)
+                df[idx, "priority"] = priority
+                forbidden[st - 1 : end + 1 - overlap] = 1
+            priority += 1
+
+    return df.filter(pl.col("priority") > 0)
+
+
+def the_filter(df: pl.DataFrame, genes: Iterable[str], overlap: int = -1):
+    out = []
+    for gene in genes:
+        out.append(
+            handle(
+                df.filter(pl.col("gene") == gene),
+                gene,
+                criteria=[
+                    # fmt: off
+                    pl.col("tm").is_between(49, 54) & (pl.col("oks")>4) & (pl.col("hp") < 35) & (pl.col("nonspecific_binding") < 0.001),
+                    pl.col("tm").is_between(49, 54) &  (pl.col("oks")>4) & (pl.col("hp") < 40) & (pl.col("nonspecific_binding") < 0.05),
+                    pl.col("tm").is_between(47, 56) &  (pl.col("oks")>3) & (pl.col("hp") < 40),
+                    pl.col("tm").is_between(46, 56) &  (pl.col("oks")>3) & (pl.col("hp") < 40),
+                    pl.col("tm").is_between(46, 56) &  (pl.col("oks")>2) & (pl.col("hp") < 40),
+                    # fmt: on
+                ],
+                overlap=overlap,
+                n=100,
+            )
+        )
+    return pl.concat(out)
 
 
 # %%
-
-
+out_nool = the_filter(df, wants)
 # %%
-with ThreadPoolExecutor(8) as executor:
-    out = list(executor.map(lambda x: the_filter(df, x), np.array_split(wants, 8)))
-out_nool = pd.concat(out).set_index("name")
-# %%
-
 counts = count_genes(out_nool)
-easy = counts[counts >= 45].index
-noteasy = counts[counts < 45].index
-res = the_filter(df, noteasy, overlap=20).set_index("name")
-
-out = pd.concat([out_nool[out_nool.gene.isin(easy)], res])
+easy = counts.filter(pl.col("count") >= 45)["gene"]
+noteasy = counts.filter(pl.col("count") < 45)["gene"]
+res = the_filter(df, noteasy, overlap=15)
+out = pl.concat([out_nool.filter(pl.col("gene").is_in(easy)), res])
 # %%
 wants_filtered = wants
-wants_filtered = [x for x in wants.iloc[:110] if (x != "Stmn1") and x not in noteasy[-9:]]
+# wants_filtered = [x for x in wants.iloc[:110] if (x != "Stmn1") and x not in noteasy[-9:]]
 # out = out[out.gene.isin(wants_filtered)]
 # %%
 
 # %%
-import matplotlib.pyplot as plt
-import seaborn as sns
+fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
 
-sns.set()
-
-
-# fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 5), sharex=True)
-# sns.stripplot(out, x="pos_start", alpha=0.5, ax=ax1)
-# plot_local_gc_content(ax2, get_seq(filter_gene(df, "Timeless").transcript_ori.unique()[0]), 50, alpha=1)
-#
-
-# %%
-fpkm = pd.read_csv("fpkm.tsv", sep="\t", index_col=0)
-fpkm.index = fpkm.index.str.split(".").str.get(0)
 
 fp = {}
-for gene in list(wants.values):
+for gene in list(wants):
     try:
         g = everything[everything.gene_id == gene_to_eid(gene)]
     except KeyError:
         print("not found", gene)
         continue
     g = g[g.transcript_support_level.isin(["1", "2"])]
-    tss = g.transcript_id.values
+    tss = g.index
     # tss = all_transcripts(gene)
     s = 0
     for ts in tss:
         try:
-            s += fpkm.loc[ts, "FPKM"]
+            s += fpkm.filter(pl.col("transcript_id(s)") == ts)["FPKM"].item()
         except KeyError:
             print(gene, ts)
     fp[gene] = s
@@ -329,6 +374,13 @@ assert len(codes) == finale.groupby("gene").count().shape[0]
 
 # %%
 count_genes(finale)
+# %%
+# %%# %%
+
+# %%
+count_genes(finale)
+# %%
+# %%# %%
 # %%
 # %%# %%
 
