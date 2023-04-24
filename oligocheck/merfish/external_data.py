@@ -1,5 +1,4 @@
-import fcntl
-from contextlib import contextmanager
+# %%
 from functools import cache
 from pathlib import Path
 from typing import overload
@@ -12,13 +11,13 @@ from Bio import SeqIO
 
 mg = mygene.MyGeneInfo()
 
-
-@contextmanager
-def lock(path: str):
-    locked_file_descriptor = open(Path(path), "w+")
-    fcntl.lockf(locked_file_descriptor, fcntl.LOCK_EX)
-    yield locked_file_descriptor
-    locked_file_descriptor.close()
+# Not used anymore but keeping it here in case we need it again.
+# @contextmanager
+# def lock(path: str):
+#     locked_file_descriptor = open(Path(path), "w+")
+#     fcntl.lockf(locked_file_descriptor, fcntl.LOCK_EX)
+#     yield locked_file_descriptor
+#     locked_file_descriptor.close()
 
 
 class ExternalData:
@@ -131,39 +130,35 @@ class ExternalData:
         )
 
 
+# %%
 def get_rrna(path: str) -> set[str]:
-    if not Path(path).exists():
-        # Get tRNA and rRNA
-        out = []
-        ncrna = SeqIO.parse("data/mm39/Mus_musculus.GRCm39.ncrna.fa", "fasta")
-        for line in ncrna:
-            attrs = line.description.split(", ")[0].split(" ")
-            actual = attrs[:7]
-            description = " ".join(attrs[7:])
-            attrs = [":".join(x.split(":")[1:]) if ":" in x else x for x in actual] + [
-                str(line.seq),
-                description,
+    # Get tRNA and rRNA
+    out = []
+    ncrna = SeqIO.parse(path, "fasta")
+    # Example line
+    # ENSMUST00000104605.4 ncrna chromosome:GRCm39:Y:1308273:1308377:-1 gene:ENSMUSG00000077793.4 gene_biotype:snRNA transcript_biotype:snRNA gene_symbol:Gm25565 description:predicted gene, 25565 [Source:MGI Symbol;Acc:MGI:5455342]
+    for line in ncrna:
+        attrs = line.description.split(", ")[0].split(" ")
+        attrs[0] = "transcript_id:" + attrs[0]
+        attrs[1] = "type:" + attrs[1]
+        actual = attrs[:7]
+        description = " ".join(attrs[7:]).split(":", maxsplit=1)
+        attrs = dict(
+            [
+                ["seq", str(line.seq)],
+                ["description", description[1].strip() if len(description) > 1 else ""],
+                *[x.split(":", maxsplit=1) for x in actual],
             ]
-            if len(attrs) < 8:
-                attrs.append("")
-            out.append(attrs)
-
-        out = pd.DataFrame.from_records(
-            out,
-            columns=[
-                "transcript_id",
-                "type",
-                "pos",
-                "gene_id",
-                "gene_biotype",
-                "transcript_biotype",
-                "gene_symbol",
-                "seq",
-                "description",
-            ],
         )
-        with open(path, "w") as f:
-            for _, row in out[out.gene_biotype == "rRNA"].iterrows():
-                f.write(f">{row.transcript_id}\n{row.seq}\n")
+        out.append(attrs)
 
-    return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
+    return set(pl.from_records(out).filter(pl.col("gene_biotype") == "rRNA")["transcript_id"])
+    # with open(path, "w") as f:
+    #     for _, row in out[out.gene_biotype == "rRNA"].iterrows():
+    #         f.write(f">{row.transcript_id}\n{row.seq}\n")
+
+    # return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
+
+
+get_rrna("data/mm39/Mus_musculus.GRCm39.ncrna.fa")
+# %%

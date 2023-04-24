@@ -69,9 +69,11 @@ gtf_all = ExternalData(
 )
 # %%
 # .set_index("transcript_id")
-rrnas = get_rrna("data/mm39/rrna.fa")
+rrnas = get_rrna("data/mm39/Mus_musculus.GRCm39.ncrna.fa")
 trna_rna_kmers = set(
-    pd.read_csv("data/mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
+    pl.read_csv("data/mm39/trcombi.txt", separator=" ", has_header=False, new_columns=["kmer", "count"])[
+        "kmer"
+    ]
 )
 
 
