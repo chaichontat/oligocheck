@@ -13,15 +13,7 @@ import polars as pl
 import primer3
 from Levenshtein import distance
 
-from oligocheck.merfish.external_data import (
-    all_transcripts,
-    gen_eid_to_ts,
-    gene_to_eid,
-    get_ensembl_gtf,
-    get_gencode,
-    get_rrna,
-    get_seq,
-)
+from oligocheck.merfish.external_data import ExternalData, get_rrna
 from oligocheck.sequtils import (
     formamide_correction,
     gc_content,
@@ -64,14 +56,23 @@ class Stringency:
 
 # %%
 # GENCODE primary only
-gtf = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
-gtf_all = get_ensembl_gtf("data/mm39/ensembl.parquet")
+gtf = ExternalData(
+    cache="data/mm39/gencode_vM32_transcripts.parquet",
+    path="data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
+    fasta="data/mm39/combi.fa",
+)
+
+gtf_all = ExternalData(
+    cache="data/mm39/gencode_vM32_transcripts_all.parquet",
+    path="data/mm39/Mus_musculus.GRCm39.109.gtf",
+    fasta="data/mm39/combi.fa",
+)
+# %%
 # .set_index("transcript_id")
 rrnas = get_rrna("data/mm39/rrna.fa")
 trna_rna_kmers = set(
     pd.read_csv("data/mm39/trcombi.txt", sep=" ", header=None, names=["counts"], index_col=0)["counts"].index
 )
-eid_to_ts = gen_eid_to_ts(gtf_all)
 
 
 # %%
@@ -81,7 +82,7 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
 
     for ts in tss:
         if not (temp / f"{ts}.fasta").exists():
-            (temp / f"{ts}.fasta").write_text(f">{ts}\n{get_seq(ts.split('_')[1])}")
+            (temp / f"{ts}.fasta").write_text(f">{ts}\n{gtf.get_seq(ts.split('_')[1])}")
 
     [(temp / f"{ts}.fastq").unlink(missing_ok=True) for ts in tss]
     [(temp / f"{ts}.sam").unlink(missing_ok=True) for ts in tss]
@@ -180,7 +181,7 @@ def filter_specifity(
             .count()
             .join(fpkm, left_on="transcript", right_on="transcript_id(s)")
             .join(
-                pl.DataFrame(gtf_all[["transcript_name"]].reset_index()),
+                gtf_all[["transcript_id", "transcript_name"]],
                 left_on="transcript",
                 right_on="transcript_id",
             )
@@ -228,15 +229,15 @@ def filter_specifity(
             elif ontarget_any:
                 continue
 
-            seq = get_seq(transcript)
+            if max(parse_cigar(row["cigar"])) > 19:
+                # logging.debug(f"Skipping {_} from cigar")
+                break
+
+            seq = gtf.get_seq(transcript)
 
             # To potentially save us some time.
             if distance(seq[row["pos_start"] : row["pos"] + row["pos_end"] + 2], row["seq"]) < 5:
                 # logging.debug(f"Skipping {_} from distance")
-                break
-
-            if max(parse_cigar(row["cigar"])) > 19:
-                # logging.debug(f"Skipping {_} from cigar")
                 break
 
             # ns = nonspecific_test(
@@ -315,9 +316,11 @@ def calc_thermo(picked: pl.DataFrame):
 
 @profile
 def run(gene: str):
-    eid = gene_to_eid(gene)
-    tss_gencode = gtf[(gtf.gene_id == eid) & gtf.transcript_support_level == 1].index
-    tss_all = all_transcripts(gene)
+    eid = gtf.gene_to_eid(gene)
+    tss_gencode = gtf.gtf.filter(
+        (pl.col("gene_id") == eid) & pl.col("transcript_support_level").is_in(["1", "2"])
+    )["transcript_id"]
+    tss_all = gtf_all.gtf.filter((pl.col("gene_id") == eid))["transcript_id"]
 
     print(f"Running {gene} with {len(tss_gencode)} transcripts")
 
@@ -333,7 +336,7 @@ def run(gene: str):
         .lazy()
         .with_columns(
             [
-                pl.col("transcript").apply(eid_to_ts).alias("transcript_name"),
+                pl.col("transcript").apply(gtf_all.eid_to_ts).alias("transcript_name"),
                 pl.col("seq").str.contains("GGGG").is_not().alias("ok_quad_c"),
                 pl.col("seq").str.contains("TTTT").is_not().alias("ok_quad_a"),
                 (pl.col("seq").str.count_match("T") / pl.col("seq").str.n_chars() < 0.28).alias("ok_comp_a"),

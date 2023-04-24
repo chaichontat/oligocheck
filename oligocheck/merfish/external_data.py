@@ -1,23 +1,16 @@
 import fcntl
-import json
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import Iterable
+from typing import overload
 
 import mygene
 import pandas as pd
 import polars as pl
 import pyfastx
-import redis
-import requests
 from Bio import SeqIO
 
 mg = mygene.MyGeneInfo()
-fa = pyfastx.Fasta("data/mm39/combi.fa", key_func=lambda x: x.split(" ")[0].split(".")[0])
-
-r_seq = redis.Redis(host="localhost", port=6379, db=0)
-r_gene = redis.Redis(host="localhost", port=6379, db=1)
 
 
 @contextmanager
@@ -28,175 +21,114 @@ def lock(path: str):
     locked_file_descriptor.close()
 
 
-@cache
-def get_seq(eid: str) -> str:
-    res = fa[eid.split(".")[0]].seq
-    if not res:
-        raise ValueError(f"Could not find {eid}")
-    return res
+class ExternalData:
+    def __init__(self, *, cache: Path | str, path: Path | str, fasta: Path | str) -> None:
+        self.fa = pyfastx.Fasta(fasta, key_func=lambda x: x.split(" ")[0].split(".")[0])
 
-    # if (res := r_seq.get(eid)) is not None:
-    #     return res.decode()
+        if Path(cache).exists():
+            self.gtf: pl.DataFrame = pl.read_parquet(cache)
+            return
+        self.gtf = self.parse_gtf(path)
+        self.gtf.write_parquet(cache)
 
-    # if version is not None:
-    #     try:
-    #         r_seq.set(eid, res := str(seqs[f"{eid}.{version}"].seq))
-    #         return res  # type: ignore
-    #     except KeyError:
-    #         ...
-
-    # for i in range(20):
-    #     try:
-    #         r_seq.set(eid, res := str(seqs[f"{eid}.{i}"].seq))  # type: ignore
-    #         return res
-    #     except KeyError:
-    #         ...
-
-    # r_seq.set(
-    #     eid,
-    #     res := requests.get(
-    #         f"https://rest.ensembl.org/sequence/id/{eid}?type=cdna",
-    #         headers={"Content-Type": "text/plain"},
-    #     ).text,
-    # )
-    # return res
-
-
-@cache
-def gene_info(gene: str):
-    if (res := r_gene.get(gene)) is not None:
-        return json.loads(res.decode())
-
-    link = f"https://rest.ensembl.org/lookup/symbol/mus_musculus/{gene}?expand=1"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-    r_gene.set(gene, json.dumps(res))
-    return res
-
-
-@cache
-def eid_info(eid: str):
-    if (res := r_gene.get(eid)) is not None:
-        test = json.loads(res.decode())
-        if "error" not in test:
-            return json.loads(res.decode())
-
-    link = f"https://rest.ensembl.org/lookup/id/{eid}"
-    res = requests.get(link, headers={"Content-Type": "application/json"}).json()
-    if "error" not in res:
-        r_gene.set(eid, json.dumps(res))
-        return res
-    raise ValueError(f"{res['error']} for {eid}")
-
-
-@cache
-def gene_to_eid(gene: str):
-    return gene_info(gene)["id"]
-
-
-def gen_eid_to_ts(gtf: pd.DataFrame):
     @cache
-    def inner(eid: str) -> str:
+    def gene_info(self, gene: str) -> pl.DataFrame:
+        return self.gtf.filter(pl.col("gene_name") == gene)
+
+    @cache
+    def gene_to_eid(self, gene: str) -> str:
+        return self.gene_info(gene)[0, "gene_id"]
+
+    @cache
+    def eid_to_ts(self, eid: str) -> str:
         eid = eid.split(".")[0]
-        row = gtf.loc[eid]
-        if row["transcript_name"]:
-            return row["transcript_name"]
-        return row["gene_id"]
+        return self.gtf.filter(pl.col("transcript_id") == eid)[0, "transcript_id"]
 
-    return inner
+    @cache
+    def all_transcripts(self, gene: str | None = None, *, eid: str | None = None) -> pl.Series:
+        if gene is not None:
+            return self.gtf.filter(pl.col("gene_name") == gene)["transcript_id"]
+        return self.gtf.filter(pl.col("gene_id") == eid)["transcript_id"]
 
+    @cache
+    def get_seq(self, eid: str) -> str:
+        res = self.fa[eid.split(".")[0]].seq
+        if not res:
+            raise ValueError(f"Could not find {eid}")
+        return res
 
-@cache
-def all_transcripts(gene: str):
-    return [t["id"] for t in gene_info(gene)["Transcript"]]
+    @overload
+    def __getitem__(self, eid: str) -> pl.Series:
+        ...
 
+    @overload
+    def __getitem__(self, eid: list[str]) -> pl.DataFrame:
+        ...
 
-@cache
-def gene_to_transcript(gene: str):
-    """Remove . from transcript first"""
-    res = gene_info(gene)
-    return {
-        "id": res["id"],
-        "canonical": res["canonical_transcript"],
-        "transcripts": [x["id"] for x in res["Transcript"]],
-        "biotype": [x["biotype"] for x in res["Transcript"]],
-    }
+    def __getitem__(self, eid: str | list[str]):
+        return self.gtf[eid]
 
-
-def transcripts_to_gene(ts: Iterable[str], species="mouse"):
-    """Remove . from transcript first"""
-    ts = [x.split(".")[0] for x in ts]
-    res = mg.querymany(ts, fields="symbol", scopes="ensembl.transcript,symbol", species=species)
-    return {x["query"]: x["symbol"] for x in res}
-
-
-def parse_gtf(path: str | Path) -> pl.DataFrame:
-    # fmt: off
-    # To get the original keys.
-    # list(reduce(lambda x, y: x | json.loads(y), jsoned['jsoned'].to_list(), {}).keys())
-    attr_keys = (
-        "gene_id", "transcript_id", "gene_type", "gene_name", "transcript_type",
-        "transcript_name", "level", "transcript_support_level", "mgi_id", "tag",
-        "havana_gene", "havana_transcript", "protein_id", "ccdsid", "ont",
-    )
-    # fmt: on
-
-    return (
-        pl.scan_csv(
-            path,
-            comment_char="#",
-            separator="\t",
-            has_header=False,
-            new_columns=[
-                "seqname",
-                "source",
-                "feature",
-                "start",
-                "end",
-                "score",
-                "strand",
-                "frame",
-                "attribute",
-            ],
-            dtypes=[pl.Utf8, pl.Utf8, pl.Utf8, pl.UInt32, pl.UInt32, pl.Utf8, pl.Utf8, pl.Utf8, pl.Utf8],
+    @staticmethod
+    def parse_gtf(path: str | Path) -> pl.DataFrame:
+        # fmt: off
+        # To get the original keys.
+        # list(reduce(lambda x, y: x | json.loads(y), jsoned['jsoned'].to_list(), {}).keys())
+        attr_keys = (
+            "gene_id", "transcript_id", "gene_type", "gene_name", "transcript_type",
+            "transcript_name", "level", "transcript_support_level", "mgi_id", "tag",
+            # "havana_gene", "havana_transcript", "protein_id", "ccdsid", "ont",
         )
-        .filter(pl.col("feature") == "transcript")
-        .with_columns(
-            pl.concat_str(
+        # fmt: on
+
+        return (
+            pl.scan_csv(
+                path,
+                comment_char="#",
+                separator="\t",
+                has_header=False,
+                new_columns=[
+                    "seqname",
+                    "source",
+                    "feature",
+                    "start",
+                    "end",
+                    "score",
+                    "strand",
+                    "frame",
+                    "attribute",
+                ],
+                dtypes=[pl.Utf8, pl.Utf8, pl.Utf8, pl.UInt32, pl.UInt32, pl.Utf8, pl.Utf8, pl.Utf8, pl.Utf8],
+            )
+            .filter(pl.col("feature") == "transcript")
+            .with_columns(
+                pl.concat_str(
+                    [
+                        pl.lit("{"),
+                        pl.col("attribute")
+                        .str.replace_all(r"; (\w+) ", r', "$1": ')
+                        .str.replace_all(";", ",")
+                        .str.replace(r"(\w+) ", r'"$1": ')
+                        .str.replace(r",$", ""),
+                        pl.lit("}"),
+                    ]
+                ).alias("jsoned")
+            )
+            .with_columns(
                 [
-                    pl.lit("{"),
-                    pl.col("attribute")
-                    .str.replace_all(r"; (\w+) ", r', "$1": ')
-                    .str.replace_all(";", ",")
-                    .str.replace(r"(\w+) ", r'"$1": ')
-                    .str.replace(r",$", ""),
-                    pl.lit("}"),
+                    pl.col("jsoned").str.json_path_match(f"$.{name}").alias(name)
+                    # .cast(pl.Categorical if "type" in name or "tag" == name else pl.Utf8)
+                    for name in attr_keys
                 ]
-            ).alias("jsoned")
+            )
+            # .drop(["attribute", "jsoned"])
+            .with_columns(
+                [
+                    pl.col("gene_id").str.extract(r"(\w+)(\.\d+)?").alias("gene_id"),
+                    pl.col("transcript_id").str.extract(r"(\w+)(\.\d+)?").alias("transcript_id"),
+                ]
+            )
+            .collect()
         )
-        .with_columns([pl.col("jsoned").str.json_path_match(f"$.{name}").alias(name) for name in attr_keys])
-        .drop(["attribute", "jsoned"])
-        .with_columns(
-            [
-                pl.col("gene_id").str.extract(r"(\w+)\.\d+").alias("gene_id"),
-                pl.col("transcript_id").str.extract(r"(\w+)\.\d+").alias("transcript_id"),
-            ]
-        )
-        .collect()
-    )
-
-
-def get_gencode(path: str = "gencode_vM32_transcripts.parquet"):
-    if not Path(path).exists():
-        everything = parse_gtf("data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf")
-        everything.write_parquet(path)
-    return pl.read_parquet(path)
-
-
-def get_ensembl_gtf(path: str = "ensembl_gtf.parquet"):
-    if not Path(path).exists():
-        everything = parse_gtf("data/mm39/Mus_musculus.GRCm39.109.gtf")
-        everything.write_parquet(path)
-    return pl.read_parquet(path)
 
 
 def get_rrna(path: str) -> set[str]:
