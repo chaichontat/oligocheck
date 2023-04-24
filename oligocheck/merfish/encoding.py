@@ -1,6 +1,5 @@
 # %%
 import logging
-import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +9,7 @@ from typing import Iterable, Literal
 
 import click
 import pandas as pd
+import polars as pl
 import primer3
 from Levenshtein import distance
 
@@ -22,7 +22,6 @@ from oligocheck.merfish.external_data import (
     get_rrna,
     get_seq,
 )
-from oligocheck.merfish.nnupack import nonspecific_test
 from oligocheck.sequtils import (
     formamide_correction,
     gc_content,
@@ -50,19 +49,16 @@ class Stringency:
     max_tm: float = 57
     min_gc: float = 35
     max_gc: float = 65
-    overlap: float = -1
     hairpin_tm: float = 30
-    unique: bool = False  # to the extent that bowtie2 cannot detect
     max_notok: int = 2
 
 
 # fmt: off
-@dataclass(frozen=True)
-class Stringencies:
-    # high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=40, filter_quad_c=True)
-    high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=30, unique=False)
-    medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=45, unique=False)
-    low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
+# @dataclass(frozen=True)
+# class Stringencies:
+#     high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=30, unique=False)
+#     medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=45, unique=False)
+#     low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
 # fmt: on
 
 
@@ -79,10 +75,8 @@ eid_to_ts = gen_eid_to_ts(gtf_all)
 
 
 # %%
-# gene = 'Pclaf'
-# stg = 'high'
 @profile
-def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Path):
+def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
     tss = [f"{gene}_{ts}" for ts in tss]
 
     for ts in tss:
@@ -102,19 +96,13 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
                         "-f",
                         (temp / f"{ts}.fasta").as_posix(),
                         "-t",
-                        str(stringency.min_tm),
+                        str(46),
                         "-T",
-                        str(stringency.max_tm),
+                        str(55),
                         "-F",
                         "30",
                         "-O",
                     ],
-                    # + (
-                    #     ["-S", str(-stringency.overlap)]
-                    #     if stringency.overlap <= 0
-                    #     else []
-                    # )
-                    # + (["-O"] if stringency.overlap > 0 else []),
                     check=True,
                 ),
                 tss,
@@ -150,43 +138,26 @@ def block_bowtie(gene: str, tss: Iterable[str], stringency: Stringency, temp: Pa
         time.sleep(0.2)
 
 
-name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
-
-
-def filter_oks(df: pd.DataFrame, max_notok: int = 2):
-    oks = df.columns[df.columns.str.contains("ok_")]
-    df["oks"] = df[oks].sum(axis=1)
-    return df[df.oks > len(oks) - max_notok]
-
-
-def cSpecStackFilter(seq: str):
-    seq = reverse_complement(seq)
-    for i in range(6):
-        if seq[i : i + 6].count("C") >= 4:
-            return False
-    return True
-
-
-def ACompfilter(seq: str):
-    return seq.count("T") / len(seq) < 0.28
-
-
 @profile
 def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
     grand = []
     for ts in [f"{gene}_{ts}" for ts in tss]:
         y = parse_sam(temp / f"{ts}.sam")
-        if "*" in y.transcript.value_counts().index:
+        if len(y.filter(pl.col("transcript") == "*")) > 0:
             raise ValueError("Unmapped reads found")
         grand.append(y)
 
     # remove duplicates from different bowtie2 runs to the same transcript
-    grand = pd.concat(grand).drop_duplicates(subset=["name", "transcript"])
-    df = grand.sort_values(by=["transcript_ori", "pos_start", "transcript"])
+    df = (
+        pl.concat(grand).unique(["name", "transcript"]).sort(by=["transcript_ori", "pos_start", "transcript"])
+    )
 
-    assert (df[df.is_ori_seq].length == df[df.is_ori_seq].seq.map(len)).all()
-    assert not df.isna().any().any()
-    print(df.columns)
+    assert (
+        df.filter(pl.col("is_ori_seq"))
+        .with_columns((pl.col("length") == pl.col("seq").str.n_chars()).alias("is_equal"))["is_equal"]
+        .all()
+    )
+    assert df.null_count().max(axis=1).item() == 0
     return df
 
 
@@ -194,118 +165,111 @@ def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
 def filter_specifity(
     gene: str,
     tss_all: Iterable[str],
-    grand: pd.DataFrame,
+    grand: pl.DataFrame,
     tss_gencode: Iterable[str] | None = None,
     threshold: float = 0.05,
     allow_pseudogene: bool = False,
 ):
-    grand["nonspecific_binding"] = 0.0
     tsss = set(tss_all)
     tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
 
     if allow_pseudogene:
-        fpkm = pd.read_parquet("data/fpkm/P0_combi.parquet")
+        fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
         counts = (
-            grand["transcript"]
-            .value_counts()
-            .sort_values(ascending=False)
-            .to_frame("count")
-            .join(fpkm)
-            .join(gtf_all[["transcript_name"]])
-        )
-        ok = counts[
-            (counts["count"] > 0.1 * counts["count"].max())
-            & (counts["FPKM"] < 0.05 * counts["FPKM"].max())
-            & (
-                counts["transcript_name"].str.startswith(gene)
-                | counts["transcript_name"].str.startswith("Gm")
+            grand.groupby("transcript")
+            .count()
+            .join(fpkm, left_on="transcript", right_on="transcript_id(s)")
+            .join(
+                pl.DataFrame(gtf_all[["transcript_name"]].reset_index()),
+                left_on="transcript",
+                right_on="transcript_id",
             )
-        ]
-        logging.debug(counts.iloc[:50].to_string())
-        logging.debug(f"Including {', '.join(ok['transcript_name'].values)}.")
-        tsss.update(ok.index)
+            .sort("count", descending=True)
+        )
+
+        ok = counts.filter(
+            (pl.col("count") > 0.1 * pl.col("count").max())
+            & (pl.col("FPKM") < 0.05 * pl.col("FPKM").max())
+            & (
+                pl.col("transcript_name").str.starts_with(gene)
+                | pl.col("transcript_name").str.starts_with("Gm")
+            )
+        )
+
+        logging.debug(counts[:50])
+        logging.debug(f"Including {', '.join(ok['transcript_name'])}.")
+        tsss.update(ok["transcript_name"])
 
     # Filter 14-mer rrna/trna
     @profile
-    def _filter_specifity(rows: pd.DataFrame):
-        if any(x in trna_rna_kmers for x in slide(rows.iloc[0].seq, n=14)):
+    def _filter_specifity(probe: pl.DataFrame):
+        if any(x in trna_rna_kmers for x in slide(probe[0, "seq"], n=14)):
             return
 
-        # if stringency.unique and not all_ontarget:
-        #     continue
         nonspecific = 0
         mapped = set()
-        for _, row in rows.iterrows():
-            if row["transcript_ori"] == row.transcript:
-                mapped.add(row.transcript)
+        for row in probe.iter_rows(named=True):
+            transcript = row["transcript"]
+            if row["transcript_ori"] == transcript:
+                mapped.add(transcript)
                 continue  # same transcript as the one designed for
 
-            if row.transcript in rrnas or "tRNA" in row.transcript:
+            if transcript in rrnas or "tRNA" in transcript:
                 logging.debug(f"Skipping {_} from trna")
                 break  # dump this sequence
 
             # Count only GENCODE transcripts but don't freak out if mapped to a diffrent isoform
-            ontarget_any = row.transcript in tsss
+            ontarget_any = transcript in tsss
 
             # Assuming that it'll bind to said isoform to save computation.
-            if tss_gencode is not None and row.transcript in tss_gencode:
-                mapped.add(row.transcript)
+            if tss_gencode is not None and transcript in tss_gencode:
+                mapped.add(transcript)
                 continue
             elif ontarget_any:
                 continue
 
-            seq = get_seq(row.transcript)
+            seq = get_seq(transcript)
 
             # To potentially save us some time.
-            if distance(seq[row.pos_start : row.pos + row.pos_end + 2], row.seq) < 5:
+            if distance(seq[row["pos_start"] : row["pos"] + row["pos_end"] + 2], row["seq"]) < 5:
                 # logging.debug(f"Skipping {_} from distance")
                 break
 
-            if max(parse_cigar(row.cigar)) > 19:
+            if max(parse_cigar(row["cigar"])) > 19:
                 # logging.debug(f"Skipping {_} from cigar")
                 break
 
-            ns = nonspecific_test(
-                row.seq,
-                seq[max(0, row.pos - 2) : min(row.pos + len(row.seq) + 2, len(seq))],
-                47,
-            )[1]["bound"]
+            # ns = nonspecific_test(
+            #     row["seq"],
+            #     seq[max(0, row["pos"] - 2) : min(row["pos"] + len(row["seq"]) + 2, len(["seq"]))],
+            #     47,
+            # )[1]["bound"]
 
-            if not ontarget_any and ns < threshold:
-                nonspecific = max(ns, nonspecific)
+            # if not ontarget_any and ns < threshold:
+            #     nonspecific = max(ns, nonspecific)
 
-            if not ontarget_any and ns >= threshold:
-                logging.debug(f"Skipping {_} from offtarget")
-                break
+            # if not ontarget_any and ns >= threshold:
+            #     logging.debug(f"Skipping {_} from offtarget")
+            #     break
 
         else:
             if tss_gencode is not None:
                 assert len(mapped) > 0
-                rows["n_mapped"] = len(mapped)
-            rows["nonspecific_binding"] = nonspecific
-            logging.debug(f"Keeping {len(rows)}")
-            return rows
+                probe = probe.with_columns(pl.lit(len(mapped)).alias("n_mapped"))
+            probe = probe.with_columns(pl.lit(nonspecific).alias("nonspecific_binding"))
+            logging.debug(f"Keeping {len(probe)}")
+            return probe
 
     res = []
     for _, rows in grand.groupby("name"):
-        _ = _filter_specifity(rows)
-        if _ is not None:
-            res.append(_)
+        df = _filter_specifity(rows)
+        if df is not None:
+            res.append(df)
 
-    # with ThreadPoolExecutor(6) as executor:
-    #     tosplit = list(grand.groupby("name"))
-    #     # split tosplit uniformly into 6 chunks
-    #     chunks = [tosplit[i::6] for i in range(6)]
-
-    #     futures.append(executor.submit(_filter_specifity, rows))
-    #     for future in as_completed(futures):
-    #         _ = future.result()
-    #         if _ is not None:
-    #             res.append(_)
     if not res:
         print(f"No candidates found for {gene}")
-        return pd.DataFrame()
-    return pd.concat(res)
+        return pl.DataFrame()
+    return pl.concat(res)
 
 
 # def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand: int = 300):
@@ -325,42 +289,32 @@ def filter_specifity(
 
 
 @profile
-def calc_thermo(picked: pd.DataFrame):
-    return picked.assign(
-        hp=picked["seq"].map(
-            lambda x: primer3.calc_hairpin_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
-            + formamide_correction(x)
-        ),
-        homodimer=picked["seq"].map(
-            lambda x: primer3.calc_homodimer_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
-            + formamide_correction(x)
-        ),
-        tm=picked["seq"].map(
-            tm_hybrid
-            # primer3.calc_tm(
-            #     x,
-            #     mv_conc=300,
-            #     dv_conc=0,
-            #     dna_conc=1,
-            #     formamide_conc=formamide_molar(0.3),
-            # )
-        ),
+def calc_thermo(picked: pl.DataFrame):
+    return picked.with_columns(
+        [
+            pl.col("seq")
+            .apply(
+                lambda x: primer3.calc_hairpin_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
+                + formamide_correction(x)
+            )
+            .alias("hp"),
+            pl.col("seq")
+            .apply(
+                lambda x: primer3.calc_homodimer_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
+                + formamide_correction(x)
+            )
+            .alias("homodimer"),
+            pl.col("seq").apply(tm_hybrid).alias("tm"),
+        ]
     )
 
 
-def filter_thermo(picked: pd.DataFrame, stringency: Stringency):
-    return picked[(picked.hp < stringency.hairpin_tm) & (picked.homodimer < 40)]
-
-
 # %%
-stg = "high"
-gene = "Pclaf"
+# gene = "Pclaf"
 
 
 @profile
-def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
-    stringency: Stringency = getattr(Stringencies, stg)
-
+def run(gene: str):
     eid = gene_to_eid(gene)
     tss_gencode = gtf[(gtf.gene_id == eid) & gtf.transcript_support_level == 1].index
     tss_all = all_transcripts(gene)
@@ -370,32 +324,44 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
     temp = Path("temp")
     temp.mkdir(exist_ok=True)
 
-    block_bowtie(gene, tss_gencode, stringency, temp)
+    block_bowtie(gene, tss_gencode, temp)
     grand = combine_transcripts(gene, tss_gencode, temp)
     print(f"{gene}: Found {len(grand)} SAM entries")
 
-    grand["ok_quad_c"] = ~grand["seq"].str.contains("GGGG")
-    grand["ok_quad_a"] = ~grand["seq"].str.contains("TTTT")
-    grand["ok_comp_a"] = grand["seq"].map(ACompfilter)
-    grand["ok_stack_c"] = grand["seq"].map(cSpecStackFilter)
-    grand["gc_content"] = grand["seq"].map(gc_content)
-    grand["ok_gc"] = (grand.gc_content >= 0.35) & (grand.gc_content <= 0.65)
-    grand["transcript_name"] = grand["transcript"].map(eid_to_ts)
-    # grand = filter_oks(grand, stringency.max_notok)
-    print(f"{gene}: Found {len(grand)} SAM entries after filtering")
+    res = (
+        filter_specifity(gene, tss_all, grand, tss_gencode=tss_gencode, allow_pseudogene=True)
+        .lazy()
+        .with_columns(
+            [
+                pl.col("transcript").apply(eid_to_ts).alias("transcript_name"),
+                pl.col("seq").str.contains("GGGG").is_not().alias("ok_quad_c"),
+                pl.col("seq").str.contains("TTTT").is_not().alias("ok_quad_a"),
+                (pl.col("seq").str.count_match("T") / pl.col("seq").str.n_chars() < 0.28).alias("ok_comp_a"),
+                pl.all(
+                    [pl.col("seq").str.slice(-6 - i, 6).str.count_match("G").lt(4) for i in range(6)]
+                ).alias("ok_stack_c"),
+                (pl.col("seq").str.count_match("G|C") / (pl.col("seq").str.n_chars())).alias("gc_content"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("gc_content").is_between(0.35, 0.65)).alias("ok_gc"),
+            ]
+        )
+        .collect()
+    )
 
-    res = filter_specifity(gene, tss_all, grand, tss_gencode=tss_gencode, allow_pseudogene=True)
     if not len(res):
         raise ValueError(f"No candidates found for {gene}")
-    print(f"{gene}: Found {len(res)} probes after specificity filtering")
-    res = res.sort_values(
-        by=["is_ori_seq", "transcript_ori", "pos_start", "transcript"], ascending=[False, True, True, True]
-    ).drop_duplicates(subset=["name"], keep="first")
+    print(f"{gene}: Found {len(res.unique('name'))} probes after specificity filtering")
 
-    # picked = filter_candidates(res, stringency)
+    # %%
+    res = res.sort(
+        by=["is_ori_seq", "transcript_ori", "pos_start", "transcript"], descending=[True, False, False, False]
+    ).unique(subset=["name"], keep="first")
+
     picked = calc_thermo(res)
-    # picked = filter_thermo(picked, stringency)
-    return picked.drop(columns=["mapq", "cigar", "flag", "rnext", "pnext", "tlen"])
+    return picked.drop(columns=["rnext", "pnext", "tlen"])
 
 
 # %%
@@ -403,21 +369,20 @@ def run(gene: str, stg: Literal["high", "medium", "low", "low_ol"]):
 
 @click.command()
 @click.argument("gene")
-@click.argument("stringency")
 @click.option("--output", "-o", type=click.Path(), default="output/")
 @click.option("--debug", "-d", is_flag=True)
-def main(gene: str, stringency: str, output: str | Path = "output/", debug: bool = False):
+def main(gene: str, output: str | Path = "output/", debug: bool = False):
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        m = run(gene, stringency)
+        m = run(gene)
     except Exception as e:
-        raise Exception(f"Failed to run {gene} with {stringency}") from e
+        raise Exception(f"Failed to run {gene}") from e
 
     Path(output).mkdir(exist_ok=True, parents=True)
-    m.to_parquet(f"{output}/{gene}_{stringency}.parquet", index=False)
+    m.write_parquet(f"{output}/{gene}.parquet")
 
 
 if __name__ == "__main__":
@@ -426,52 +391,11 @@ if __name__ == "__main__":
 
 # %%
 
-# return selected, filtered
-
-# %%
-# if __name__ == "__main__":
-# selected, filtered = run("Pclaf", "high")
-
-
-# %%
-
-
-# picked = filter_candidates(res, stringency)
-# picked = calc_thermo(picked, stringency)
-# filtered = picked[(picked.hp < stringency.hairpin_tm) & (picked.homodimer < 55)]
-# selected = handle_overlap(tss, filtered, stringency)
-
-# if stringency.filter_quad_c:
-#     selected = selected[~selected['seq'].str.contains("CCCC")]
-
-
-# print(len(selected))
-# %%
-
 # -L ignore kmer < 2 c is counter bit. Want to be such that most kmers use only 1 counter, so 8.
 # jellyfish count -m 18 -o output -t 32 -s 10G -L 2 -c 3 combi.fa
 # jellyfish dump -c -L 2 output > output.txt
 # count = dict()
 # for i, x in jsorted.iterrows():
 #     count[x[0]] = x[1]
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-# %%
-# %%
-
-
-# %%
-
 
 # %%
