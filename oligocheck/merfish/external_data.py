@@ -7,6 +7,7 @@ from typing import Iterable
 
 import mygene
 import pandas as pd
+import polars as pl
 import pyfastx
 import redis
 import requests
@@ -29,7 +30,10 @@ def lock(path: str):
 
 @cache
 def get_seq(eid: str) -> str:
-    return fa[eid.split(".")[0]].seq
+    res = fa[eid.split(".")[0]].seq
+    if not res:
+        raise ValueError(f"Could not find {eid}")
+    return res
 
     # if (res := r_seq.get(eid)) is not None:
     #     return res.decode()
@@ -125,59 +129,74 @@ def transcripts_to_gene(ts: Iterable[str], species="mouse"):
     return {x["query"]: x["symbol"] for x in res}
 
 
-def parse_gtf(path: str | Path) -> pd.DataFrame:
-    gencode = pd.read_table(
-        path,
-        comment="#",
-        sep="\t",
-        names=[
-            "seqname",
-            "source",
-            "feature",
-            "start",
-            "end",
-            "score",
-            "strand",
-            "frame",
-            "attribute",
-        ],
-        dtype=dict(
-            seqname=str,
-            source=str,
-            feature=str,
-            start=int,
-            end=int,
-            score=str,
-            strand=str,
-            frame=str,
-            attribute=str,
-        ),
+def parse_gtf(path: str | Path) -> pl.DataFrame:
+    # fmt: off
+    # To get the original keys.
+    # list(reduce(lambda x, y: x | json.loads(y), jsoned['jsoned'].to_list(), {}).keys())
+    attr_keys = (
+        "gene_id", "transcript_id", "gene_type", "gene_name", "transcript_type",
+        "transcript_name", "level", "transcript_support_level", "mgi_id", "tag",
+        "havana_gene", "havana_transcript", "protein_id", "ccdsid", "ont",
     )
-    gencode = gencode[gencode.feature.isin(["transcript", "gene"])]
-    gencode["attribute"] = gencode.attribute.apply(
-        lambda row: dict(kv.strip().replace('"', "").split(" ", maxsplit=1) for kv in row.split(";") if kv)
+    # fmt: on
+
+    return (
+        pl.scan_csv(
+            path,
+            comment_char="#",
+            separator="\t",
+            has_header=False,
+            new_columns=[
+                "seqname",
+                "source",
+                "feature",
+                "start",
+                "end",
+                "score",
+                "strand",
+                "frame",
+                "attribute",
+            ],
+            dtypes=[pl.Utf8, pl.Utf8, pl.Utf8, pl.UInt32, pl.UInt32, pl.Utf8, pl.Utf8, pl.Utf8, pl.Utf8],
+        )
+        .filter(pl.col("feature") == "transcript")
+        .with_columns(
+            pl.concat_str(
+                [
+                    pl.lit("{"),
+                    pl.col("attribute")
+                    .str.replace_all(r"; (\w+) ", r', "$1": ')
+                    .str.replace_all(";", ",")
+                    .str.replace(r"(\w+) ", r'"$1": ')
+                    .str.replace(r",$", ""),
+                    pl.lit("}"),
+                ]
+            ).alias("jsoned")
+        )
+        .with_columns([pl.col("jsoned").str.json_path_match(f"$.{name}").alias(name) for name in attr_keys])
+        .drop(["attribute", "jsoned"])
+        .with_columns(
+            [
+                pl.col("gene_id").str.extract(r"(\w+)\.\d+").alias("gene_id"),
+                pl.col("transcript_id").str.extract(r"(\w+)\.\d+").alias("transcript_id"),
+            ]
+        )
+        .collect()
     )
-    trs_only = gencode[gencode["attribute"].apply(lambda x: "transcript_id" in x)]
-    everything = pd.DataFrame(trs_only.apply(lambda row: {**row, **row.attribute}, axis=1).to_list()).drop(
-        columns=["attribute"]
-    )
-    everything["gene_id"] = everything.gene_id.map(lambda x: x.split(".")[0])
-    everything["transcript_id"] = everything.transcript_id.map(lambda x: x.split(".")[0])
-    return everything
 
 
 def get_gencode(path: str = "gencode_vM32_transcripts.parquet"):
     if not Path(path).exists():
         everything = parse_gtf("data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf")
-        everything.to_parquet(path)
-    return pd.read_parquet(path).set_index("transcript_id")
+        everything.write_parquet(path)
+    return pl.read_parquet(path)
 
 
 def get_ensembl_gtf(path: str = "ensembl_gtf.parquet"):
     if not Path(path).exists():
         everything = parse_gtf("data/mm39/Mus_musculus.GRCm39.109.gtf")
-        everything.to_parquet(path)
-    return pd.read_parquet(path).set_index("transcript_id")
+        everything.write_parquet(path)
+    return pl.read_parquet(path)
 
 
 def get_rrna(path: str) -> set[str]:
