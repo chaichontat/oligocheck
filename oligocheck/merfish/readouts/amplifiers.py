@@ -1,12 +1,11 @@
 # %%
 from functools import cache
-from itertools import chain, cycle
+from itertools import cycle
 
 import pandas as pd
 import primer3
 from Levenshtein import distance
 
-from oligocheck.merfish.constants import SP6
 from oligocheck.sequtils import reverse_complement
 
 

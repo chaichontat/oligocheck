@@ -1,79 +1,57 @@
-# %%
-from typing import Callable, Iterable
-
 import numpy as np
-import pandas as pd
+import polars as pl
 
-from oligocheck.merfish.external_data import gene_to_eid, get_gencode
-
-everything = get_gencode("data/mm39/gencode_vM32_transcripts.parquet")
+from oligocheck.merfish.external_data import ExternalData
 
 
 def handle_overlap(
-    filtered: pd.DataFrame, criteria: list[Callable[[pd.Series], bool]] = [], overlap: int = -1, n: int = 200
+    ensembl: ExternalData,
+    df: pl.DataFrame,
+    criteria: list[pl.Expr],
+    overlap: int = -1,
+    n: int = 200,
 ):
-    if not filtered.gene.unique().size == 1:
+    if len(df.select(pl.col("gene").unique())) > 1:
         raise ValueError("More than one gene in filtered")
-    filtered = filtered.sort_values(
-        by=["is_ori_seq", "transcript_ori", "pos_start", "tm"], ascending=[False, True, True, False]
+    gene = df["gene"].unique().item()
+    df = df.sort(
+        by=["is_ori_seq", "transcript_ori", "pos_start", "tm"], descending=[True, False, False, True]
     )
-    eid = gene_to_eid(filtered.gene.iloc[0])
-    tss = tuple(everything[everything.gene_id == eid].index)
-    if not criteria:
-        criteria = [lambda _: True]
+    eid = ensembl.gene_to_eid(gene)
+    tss = tuple(ensembl.filter(pl.col("gene_id") == eid)["transcript_id"])
 
-    selected = {}
+    if not criteria:
+        criteria = [pl.all("*")]
+
+    df = df.with_columns(
+        [
+            pl.lit(0, dtype=pl.UInt8).alias("priority"),
+            pl.arange(0, len(df), dtype=pl.UInt32).alias("index"),
+        ]
+    )
+    selected = set()
+
     for ts in tss:
-        this_transcript = filtered[filtered["transcript_ori"] == ts]
+        this_transcript = df.filter(pl.col("transcript_ori") == ts)
         if len(this_transcript) == 0:
             print("No match found for", ts)
             continue
-        forbidden = np.zeros(this_transcript.pos_end.max() + 1 + max(0, overlap), dtype=bool)
+
+        forbidden = np.zeros(df.select(pl.col("pos_end")).max().item() + 1 + max(0, overlap), dtype=bool)
         priority = 1
         for criterion in criteria:
             if len(selected) >= n:
                 break
-            for idx, r in this_transcript.iterrows():
-                if idx in selected or not criterion(r):
+            for idx, st, end in (
+                df.filter(criterion & ~pl.col("index").is_in(selected))
+                .select(["index", "pos_start", "pos_end"])
+                .iter_rows()
+            ):
+                if np.any(forbidden[st - 1 : end + 1 - overlap]):
                     continue
-                if np.any(forbidden[r.pos_start - 1 : r.pos_end + 1 - overlap]):
-                    continue
-                selected[idx] = priority
-                forbidden[r.pos_start - 1 : r.pos_end + 1 - overlap] = 1
+                selected.add(idx)
+                df[idx, "priority"] = priority
+                forbidden[st - 1 : end + 1 - overlap] = 1
             priority += 1
-    filtered = filtered.loc[selected.keys()]
-    filtered["priority"] = filtered.index.map(selected)
-    return filtered
 
-
-def the_filter(df: pd.DataFrame, genes: Iterable[str], overlap: int = -1):
-    out = []
-    for gene in genes:
-        out.append(
-            handle_overlap(
-                df[(df.gene == gene)],
-                criteria=[
-                    lambda x: (x.tm > 49)
-                    & (x.tm < 54)
-                    & (x.oks > 4)
-                    & (x.hp < 35)
-                    & (x.nonspecific_binding < 0.001),
-                    lambda x: (x.tm > 49)
-                    & (x.tm < 54)
-                    & (x.oks > 4)
-                    & (x.hp < 40)
-                    & (x.nonspecific_binding < 0.05),
-                    lambda x: (x.tm > 49)
-                    & (x.tm < 54)
-                    & (x.oks > 3)
-                    & (x.hp < 35)
-                    & (x.nonspecific_binding < 0.001),
-                    lambda x: (x.tm > 47) & (x.tm < 56) & (x.hp < 40) & (x.oks > 3),
-                    lambda x: (x.tm > 46) & (x.tm < 56) & (x.hp < 40) & (x.oks > 3),
-                    lambda x: (x.tm > 46) & (x.tm < 56) & (x.hp < 40) & (x.oks > 2),
-                ],
-                overlap=overlap,
-                n=100,
-            )
-        )
-    return pd.concat(out)
+    return df.filter(pl.col("priority") > 0)

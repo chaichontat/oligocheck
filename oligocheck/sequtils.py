@@ -118,9 +118,8 @@ def plot_local_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: A
     ax.set_ylabel("GC (%)")
 
 
-def parse_sam(path: str | Path) -> pl.DataFrame:
-    path = Path(path)
-    file_read = [",".join(line.strip().split("\t")[:10]) for line in path.read_text().split("\n")]
+def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
+    file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
 
     return (
         pl.read_csv(
@@ -139,21 +138,31 @@ def parse_sam(path: str | Path) -> pl.DataFrame:
                 "seq",
             ],
         )
+        .lazy()
         .with_columns(
             [
                 pl.col("transcript").str.extract(r"(.*)\.\d+").alias("transcript"),
+            ]
+            + [
                 pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 1).alias("gene"),
                 pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 2).alias("transcript_ori"),
                 pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 3).cast(pl.UInt32).alias("pos_start"),
                 pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 4).cast(pl.UInt32).alias("pos_end"),
             ]
+            if split_name
+            else []
         )
         .with_columns(
             [
                 (pl.col("transcript") == pl.col("transcript_ori")).alias("is_ori_seq"),
+            ]
+            + [
                 (pl.col("pos_end") - pl.col("pos_start") + 1).alias("length"),
             ]
+            if split_name
+            else []
         )
+        .collect()
     )
 
 

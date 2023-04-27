@@ -1,4 +1,5 @@
 # %%
+import json
 import logging
 import subprocess
 import time
@@ -13,6 +14,7 @@ import polars as pl
 import primer3
 from Levenshtein import distance
 
+from oligocheck.merfish.alignment import run_bowtie
 from oligocheck.merfish.external_data import ExternalData, get_rrna
 from oligocheck.sequtils import (
     formamide_correction,
@@ -118,34 +120,19 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
         time.sleep(0.2)
 
     with ThreadPoolExecutor() as executor:
-        executor.map(
-            lambda ts: subprocess.run(
-                # --no-hd No SAM header
-                # -a report all alignments
-                # -D 20 consecutive seed extension attempts can "fail" before Bowtie 2 moves on
-                # -R 3 the maximum number of times Bowtie 2 will "re-seed" reads with repetitive seeds.
-                # -L 17 seed length
-                # -i C,2 Seed interval, every 2 bp
-                # --score-min G,1,4 f(x) = 1 + 4*ln(read_length)
-                f"bowtie2 -x data/mm39/mm39 {(temp / f'{ts}.fastq').as_posix()} "
-                f"--no-hd -k 100 --local -D 20 -R 3 -N 0 -L 17 -i C,2 --score-min G,1,4 "
-                f"-S {(temp / f'{ts}.sam').as_posix()}",
-                shell=True,
-                check=True,
-            ),
+        res = executor.map(
+            lambda ts: (ts, run_bowtie((temp / f"{ts}.fastq").read_text(), "data/mm39/mm39")),
             tss,
         )
 
-    while not all((temp / f"{ts}.sam").exists() for ts in tss):
-        print("Waiting for files to flush to disk...")
-        time.sleep(0.2)
+    return list(res)
 
 
 @profile
-def combine_transcripts(gene: str, tss: Iterable[str], temp: Path):
+def combine_transcripts(sams: Iterable[str]):
     grand = []
-    for ts in [f"{gene}_{ts}" for ts in tss]:
-        y = parse_sam(temp / f"{ts}.sam")
+    for sam in sams:
+        y = parse_sam(sam)
         if len(y.filter(pl.col("transcript") == "*")) > 0:
             raise ValueError("Unmapped reads found")
         grand.append(y)
@@ -189,7 +176,7 @@ def filter_specifity(
             )
             .sort("count", descending=True)
         )
-
+        # Filtered based on expression and number of probes aligned.
         ok = counts.filter(
             (pl.col("count") > 0.1 * pl.col("count").max())
             & (pl.col("FPKM") < 0.05 * pl.col("FPKM").max())
@@ -200,8 +187,9 @@ def filter_specifity(
         )
 
         logging.debug(counts[:50])
-        logging.debug(f"Including {', '.join(ok['transcript_name'])}.")
-        tsss.update(ok["transcript_name"])
+        print(f"Including {', '.join(ok['transcript_name'])}.")
+        tsss.update(ok["transcript"])
+        assert all(map(lambda x: x.startswith("EN"), tsss))
 
     # Filter 14-mer rrna/trna
     @profile
@@ -221,14 +209,12 @@ def filter_specifity(
                 logging.debug(f"Skipping {_} from trna")
                 break  # dump this sequence
 
-            # Count only GENCODE transcripts but don't freak out if mapped to a diffrent isoform
-            ontarget_any = transcript in tsss
-
-            # Assuming that it'll bind to said isoform to save computation.
             if tss_gencode is not None and transcript in tss_gencode:
+                # Assuming that it'll bind to said isoform to save computation.
                 mapped.add(transcript)
                 continue
-            elif ontarget_any:
+            elif transcript in tsss:
+                # Count only GENCODE transcripts but don't freak out if mapped to a different isoform
                 continue
 
             if max(parse_cigar(row["cigar"])) > 19:
@@ -272,7 +258,7 @@ def filter_specifity(
     if not res:
         print(f"No candidates found for {gene}")
         return pl.DataFrame()
-    return pl.concat(res)
+    return pl.concat(res), list(tsss)
 
 
 # def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand: int = 300):
@@ -329,13 +315,15 @@ def run(gene: str):
     temp = Path("temp")
     temp.mkdir(exist_ok=True)
 
-    block_bowtie(gene, tss_gencode, temp)
-    grand = combine_transcripts(gene, tss_gencode, temp)
+    sams = block_bowtie(gene, tss_gencode, temp)
+    grand = combine_transcripts(map(lambda x: x[1], sams))
     print(f"{gene}: Found {len(grand)} SAM entries")
+    res, allowed_transcripts = filter_specifity(
+        gene, tss_all, grand, tss_gencode=tss_gencode, allow_pseudogene=True
+    )
 
     res = (
-        filter_specifity(gene, tss_all, grand, tss_gencode=tss_gencode, allow_pseudogene=True)
-        .lazy()
+        res.lazy()
         .with_columns(
             [
                 pl.col("transcript").apply(gtf_all.eid_to_ts).alias("transcript_name"),
@@ -366,7 +354,12 @@ def run(gene: str):
     ).unique(subset=["name"], keep="first")
 
     picked = calc_thermo(res)
-    return picked.drop(columns=["rnext", "pnext", "tlen"])
+    return picked.drop(columns=["rnext", "pnext", "tlen"]), dict(
+        gene=gene,
+        generated_on=tss_gencode.to_list(),
+        allowed=allowed_transcripts,
+        allowed_name=list(map(gtf_all.ts_to_gene, allowed_transcripts)),
+    )
 
 
 # %%
@@ -382,12 +375,14 @@ def main(gene: str, output: str | Path = "output/", debug: bool = False):
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        m = run(gene)
+        m, md = run(gene)
     except Exception as e:
         raise Exception(f"Failed to run {gene}") from e
 
     Path(output).mkdir(exist_ok=True, parents=True)
     m.write_parquet(f"{output}/{gene}.parquet")
+    with open(f"{output}/{gene}.json", "w") as f:
+        json.dump(md, f)
 
 
 if __name__ == "__main__":
@@ -403,4 +398,5 @@ if __name__ == "__main__":
 # for i, x in jsorted.iterrows():
 #     count[x[0]] = x[1]
 
+# %%
 # %%

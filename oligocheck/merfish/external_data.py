@@ -1,10 +1,9 @@
 # %%
 from functools import cache
 from pathlib import Path
-from typing import overload
+from typing import Any, overload
 
 import mygene
-import pandas as pd
 import polars as pl
 import pyfastx
 from Bio import SeqIO
@@ -21,7 +20,7 @@ mg = mygene.MyGeneInfo()
 
 
 class ExternalData:
-    def __init__(self, *, cache: Path | str, path: Path | str, fasta: Path | str) -> None:
+    def __init__(self, cache: Path | str, *, path: Path | str, fasta: Path | str) -> None:
         self.fa = pyfastx.Fasta(fasta, key_func=lambda x: x.split(" ")[0].split(".")[0])
 
         if Path(cache).exists():
@@ -37,6 +36,13 @@ class ExternalData:
     @cache
     def gene_to_eid(self, gene: str) -> str:
         return self.gene_info(gene)[0, "gene_id"]
+
+    @cache
+    def ts_to_gene(self, ts: str) -> str:
+        try:
+            return self.gtf.filter(pl.col("transcript_id") == ts)[0, "gene_name"]
+        except pl.ComputeError:
+            return ts
 
     @cache
     def eid_to_ts(self, eid: str) -> str:
@@ -66,6 +72,9 @@ class ExternalData:
 
     def __getitem__(self, eid: str | list[str]):
         return self.gtf[eid]
+
+    def filter(self, *args: Any, **kwargs: Any):
+        return self.gtf.filter(*args, **kwargs)
 
     @staticmethod
     def parse_gtf(path: str | Path) -> pl.DataFrame:
