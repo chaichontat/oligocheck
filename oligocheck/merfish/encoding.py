@@ -6,25 +6,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable
 
 import click
-import pandas as pd
 import polars as pl
 import primer3
 from Levenshtein import distance
 
 from oligocheck.merfish.alignment import run_bowtie
 from oligocheck.merfish.external_data import ExternalData, get_rrna
-from oligocheck.sequtils import (
-    formamide_correction,
-    gc_content,
-    parse_cigar,
-    parse_sam,
-    reverse_complement,
-    slide,
-    tm_hybrid,
-)
+from oligocheck.sequtils import formamide_correction, parse_cigar, parse_sam, slide, tm_hybrid
 
 try:
     profile
@@ -45,15 +36,6 @@ class Stringency:
     max_gc: float = 65
     hairpin_tm: float = 30
     max_notok: int = 2
-
-
-# fmt: off
-# @dataclass(frozen=True)
-# class Stringencies:
-#     high   = Stringency(min_tm=49, min_gc=35, max_gc=65, hairpin_tm=30, unique=False)
-#     medium = Stringency(min_tm=49, min_gc=25, max_gc=70, hairpin_tm=45, unique=False)
-#     low    = Stringency(min_tm=48, min_gc=25, max_gc=70, hairpin_tm=35, unique=False)
-# fmt: on
 
 
 # %%
@@ -144,7 +126,7 @@ def combine_transcripts(sams: Iterable[str]):
 
     assert (
         df.filter(pl.col("is_ori_seq"))
-        .with_columns((pl.col("length") == pl.col("seq").str.n_chars()).alias("is_equal"))["is_equal"]
+        .select((pl.col("length") == pl.col("seq").str.n_chars()).alias("is_equal"))["is_equal"]
         .all()
     )
     assert df.null_count().max(axis=1).item() == 0
@@ -304,11 +286,8 @@ def calc_thermo(picked: pl.DataFrame):
 
 @profile
 def run(gene: str):
-    eid = gtf.gene_to_eid(gene)
-    tss_gencode = gtf.gtf.filter(
-        (pl.col("gene_id") == eid) & pl.col("transcript_support_level").is_in(["1", "2"])
-    )["transcript_id"]
-    tss_all = gtf_all.gtf.filter((pl.col("gene_id") == eid))["transcript_id"]
+    tss_gencode = gtf.filter_gene(gene)["transcript_id"]
+    tss_all = gtf_all.filter_gene(gene)["transcript_id"]
 
     print(f"Running {gene} with {len(tss_gencode)} transcripts")
 

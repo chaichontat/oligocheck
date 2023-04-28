@@ -62,6 +62,9 @@ class ExternalData:
             raise ValueError(f"Could not find {eid}")
         return res
 
+    def filter_gene(self, gene: str) -> pl.DataFrame:
+        return self.gtf.filter(pl.col("gene_name") == gene)
+
     @overload
     def __getitem__(self, eid: str) -> pl.Series:
         ...

@@ -141,7 +141,10 @@ def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
         .lazy()
         .with_columns(
             [
-                pl.col("transcript").str.extract(r"(.*)\.\d+").alias("transcript"),
+                pl.when(pl.col("transcript").str.contains(r"(.*)\.\d+"))
+                .then(pl.col("transcript").str.extract(r"(.*)\.\d+"))
+                .otherwise(pl.col("transcript"))
+                .alias("transcript")
             ]
             + [
                 pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 1).alias("gene"),
