@@ -1,11 +1,9 @@
 # %%
-import io
 import json
-import subprocess
 from functools import partial, reduce
 from itertools import cycle, permutations
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import numpy.typing as npt
@@ -13,18 +11,19 @@ import pandas as pd
 import polars as pl
 from expression import pipe
 
-from oligocheck.merfish.alignment import run_bowtie
+from oligocheck.algorithms import find_overlap, find_overlap_weighted
+from oligocheck.merfish.alignment import gen_fastq, run_bowtie
 from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.filtration import handle_overlap
-from oligocheck.merfish.readouts.blacklist import check_align, get_blacklist
+from oligocheck.merfish.readouts.blacklist import get_blacklist
 from oligocheck.merfish.readouts.codebook import CodebookPicker
 
 # from oligocheck.merfish.filtration import the_filter
-from oligocheck.sequtils import equal_distance, parse_cigar, parse_sam, reverse_complement, tm_hybrid
+from oligocheck.sequtils import equal_distance, parse_sam, reverse_complement, tm_hybrid
 
 pl.Config.set_fmt_str_lengths(30)
 pl.Config.set_tbl_rows(30)
-wants = ["Eef2"]
+wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
 
 
 def count_genes(df: pl.DataFrame) -> pl.DataFrame:
@@ -60,33 +59,115 @@ metadata = [json.loads(Path(f"output/{gene}.json").read_text()) for gene in want
 allowed = {x["gene"]: x["allowed"] for x in metadata}
 df = pl.concat(temp).with_columns(pl.sum(pl.col("^ok_.*$")).alias("oks"))
 
+# %%
+
+
+def handle_overlap(
+    ensembl: ExternalData,
+    df: pl.DataFrame,
+    criteria: list[pl.Expr],
+    overlap: int = -1,
+    n: int = 200,
+):
+    if len(gene := df.select(pl.col("gene").unique())) > 1:
+        raise ValueError("More than one gene in filtered")
+    gene = gene.item()
+    df = df.sort(by=["is_ori_seq", "transcript_ori", "pos_end", "tm"], descending=[True, False, False, True])
+    eid = ensembl.gene_to_eid(gene)
+    tss = tuple(ensembl.filter(pl.col("gene_id") == eid)["transcript_id"])
+
+    if not criteria:
+        criteria = [pl.col("*")]
+
+    ddf = df.lazy().with_row_count("index").with_columns(priority=pl.lit(0, dtype=pl.UInt8))
+    priority = len(criteria)
+    for criterion in reversed(criteria):
+        ddf = ddf.update(
+            ddf.filter(criterion).with_columns(priority=pl.lit(priority, dtype=pl.UInt8)), on="index"
+        )
+        priority -= 1
+    df = ddf.filter(pl.col("priority") > 0).collect()
+
+    selected_global = set()
+    for ts in tss:
+        this_transcript = df.filter(pl.col("transcript_ori") == ts)
+        if not len(this_transcript):
+            continue
+
+        for i in range(1, len(criteria) + 1):
+            run = (
+                df.filter((pl.col("priority") <= i) & ~pl.col("index").is_in(selected_global))
+                .select(["index", "pos_start", "pos_end", "priority", "n_mapped"])
+                .sort(["pos_end", "pos_start"])
+            )
+
+            priorities = (run["priority"].apply(lambda x: 5 - x) + run["n_mapped"] / 5).to_list()
+            if i == 1:
+                ols = find_overlap(run["pos_start"], run["pos_end"], overlap=overlap)
+            else:
+                ols = find_overlap_weighted(run["pos_start"], run["pos_end"], priorities, overlap=overlap)
+            sel_local = set(run[ols]["index"].to_list())
+            print(i, len(sel_local))
+
+            # for idx, st, end in (
+            #     df.filter((pl.col("priority") <= i) & ~pl.col("index").is_in(selected_global))
+            #     .select(["index", "pos_start", "pos_end"])
+            #     .sort(["pos_end", "pos_start"])
+            #     .iter_rows()
+            # ):
+            #     if st > curr_right - overlap:
+            #         curr_right = end
+            #         sel_local.add(idx)
+            if len(sel_local) > n:
+                break
+
+        selected_global |= sel_local
+
+    return df.filter(pl.col("index").is_in(selected_global))
+
 
 def the_filter(df: pl.DataFrame, overlap: int = -1):
-    return df.groupby("gene").apply(
-        lambda group: handle_overlap(
-            ensembl,
-            group,
-            criteria=[
-                # fmt: off
+    out = []
+    for name, group in df.groupby("gene"):
+        out.append(
+            handle_overlap(
+                ensembl,
+                group,
+                criteria=[
+                    # fmt: off
                     pl.col("tm").is_between(49, 54) & (pl.col("oks") > 4) & (pl.col("hp") < 35) & (pl.col("nonspecific_binding") < 0.001),
                     pl.col("tm").is_between(49, 54) & (pl.col("oks") > 4) & (pl.col("hp") < 40) & (pl.col("nonspecific_binding") < 0.05),
-                    pl.col("tm").is_between(47, 56) & (pl.col("oks") > 3) & (pl.col("hp") < 40),
-                    pl.col("tm").is_between(46, 56) & (pl.col("oks") > 3) & (pl.col("hp") < 40),
-                    pl.col("tm").is_between(46, 56) & (pl.col("oks") > 2) & (pl.col("hp") < 40),
-                # fmt: on
-            ],
-            overlap=overlap,
+                    pl.col("tm").is_between(48, 56) & (pl.col("oks") > 3) & (pl.col("hp") < 40),
+                    pl.col("tm").is_between(48, 56) & (pl.col("oks") > 2) & (pl.col("hp") < 40),
+                    # fmt: on
+                ],
+                overlap=overlap,
+            )
         )
-    )
+    return pl.concat(out)
 
 
 # %%
-out_nool = the_filter(df)
+out_nool = the_filter(df.filter(pl.col("gene") == "Mbp"))
 # %%
+
+
+def stripplot(*args: Iterable[float], **kwargs: Any):
+    import pandas as pd
+    import seaborn as sns
+
+    df = pd.concat(pd.DataFrame({"x": u, "y": str(i)}) for i, u in enumerate(args))
+    return sns.stripplot(data=df, **(dict(orient="h", alpha=0.6) | kwargs))
+
+
 counts = count_genes(out_nool)
 easy = counts.filter(pl.col("count") >= 45)["gene"]
 noteasy = counts.filter(pl.col("count") < 45)["gene"]
+print(counts)
+# %%
 res = the_filter(df.filter(pl.col("gene").is_in(noteasy)), overlap=15)
+print(count_genes(res))
+# %%
 out = pl.concat([out_nool.filter(pl.col("gene").is_in(easy)), res])
 # %%
 # wants_filtered = [x for x in wants.iloc[:110] if (x != "Stmn1") and x not in noteasy[-9:]]
@@ -188,14 +269,8 @@ for_bowtie = (
     )
 )
 
-f = io.StringIO()
-for row in for_bowtie.iter_rows(named=True):
-    f.write(f"@{row['name']}\n")
-    f.write(row["constructed"] + "\n")
-    f.write("+\n")
-    f.write("~" * len(row["constructed"]) + "\n")
-
-sam = run_bowtie(f.getvalue(), "data/mm39/mm39")
+fastq = gen_fastq(for_bowtie.select(name=pl.col("name"), seq=pl.col("constructed")))
+sam = run_bowtie(fastq.getvalue(), "data/mm39/mm39")
 
 # %%
 
@@ -317,4 +392,7 @@ assert len(codes) == finale.groupby("gene").count().shape[0]
 # %%
 count_genes(finale)
 # %%
+# %%# %%
+# %%# %%
+# %%# %%
 # %%# %%

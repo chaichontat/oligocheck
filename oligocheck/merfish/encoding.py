@@ -28,16 +28,6 @@ def tm(s: str) -> float:
     return primer3.calc_tm(s, mv_conc=300, dv_conc=0, dna_conc=1) + 5
 
 
-@dataclass(frozen=True)
-class Stringency:
-    min_tm: float = 47
-    max_tm: float = 57
-    min_gc: float = 35
-    max_gc: float = 65
-    hairpin_tm: float = 30
-    max_notok: int = 2
-
-
 # %%
 # GENCODE primary only
 gtf = ExternalData(
@@ -83,7 +73,7 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
                         "-f",
                         (temp / f"{ts}.fasta").as_posix(),
                         "-t",
-                        str(46),
+                        str(48),
                         "-T",
                         str(55),
                         "-F",
@@ -144,13 +134,14 @@ def filter_specifity(
 ):
     tsss = set(tss_all)
     tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
+    tss_pseudo = set()
 
     if allow_pseudogene:
         fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
         counts = (
             grand.groupby("transcript")
             .count()
-            .join(fpkm, left_on="transcript", right_on="transcript_id(s)")
+            .join(fpkm, left_on="transcript", right_on="transcript_id(s)", how="left")
             .join(
                 gtf_all[["transcript_id", "transcript_name"]],
                 left_on="transcript",
@@ -160,8 +151,12 @@ def filter_specifity(
         )
         # Filtered based on expression and number of probes aligned.
         ok = counts.filter(
-            (pl.col("count") > 0.1 * pl.col("count").max())
-            & (pl.col("FPKM") < 0.05 * pl.col("FPKM").max())
+            (pl.col("count") > 0.1 * pl.col("count").first())
+            & (
+                pl.col("FPKM") < 0.05 * pl.col("FPKM").first()
+                if counts[0, "FPKM"] is not None and counts[0, "FPKM"] > 1.0
+                else pl.lit(True)
+            )
             & (
                 pl.col("transcript_name").str.starts_with(gene)
                 | pl.col("transcript_name").str.starts_with("Gm")
@@ -170,7 +165,7 @@ def filter_specifity(
 
         logging.debug(counts[:50])
         print(f"Including {', '.join(ok['transcript_name'])}.")
-        tsss.update(ok["transcript"])
+        tss_pseudo.update(ok["transcript"])
         assert all(map(lambda x: x.startswith("EN"), tsss))
 
     # Filter 14-mer rrna/trna
@@ -181,6 +176,7 @@ def filter_specifity(
 
         nonspecific = 0
         mapped = set()
+        pseudo_binder = False
         for row in probe.iter_rows(named=True):
             transcript = row["transcript"]
             if row["transcript_ori"] == transcript:
@@ -197,6 +193,9 @@ def filter_specifity(
                 continue
             elif transcript in tsss:
                 # Count only GENCODE transcripts but don't freak out if mapped to a different isoform
+                continue
+            elif transcript in tss_pseudo:
+                pseudo_binder = True
                 continue
 
             if max(parse_cigar(row["cigar"])) > 19:
@@ -227,8 +226,10 @@ def filter_specifity(
             if tss_gencode is not None:
                 assert len(mapped) > 0
                 probe = probe.with_columns(pl.lit(len(mapped)).alias("n_mapped"))
-            probe = probe.with_columns(pl.lit(nonspecific).alias("nonspecific_binding"))
-            logging.debug(f"Keeping {len(probe)}")
+            probe = probe.with_columns(
+                nonspecific_binding=pl.lit(nonspecific), pseudobinder=pl.lit(pseudo_binder)
+            )
+            # logging.debug(f"Keeping {len(probe)}")
             return probe
 
     res = []
@@ -287,6 +288,7 @@ def calc_thermo(picked: pl.DataFrame):
 @profile
 def run(gene: str):
     tss_gencode = gtf.filter_gene(gene)["transcript_id"]
+    longest = max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
 
     print(f"Running {gene} with {len(tss_gencode)} transcripts")
@@ -294,7 +296,7 @@ def run(gene: str):
     temp = Path("temp")
     temp.mkdir(exist_ok=True)
 
-    sams = block_bowtie(gene, tss_gencode, temp)
+    sams = block_bowtie(gene, [longest], temp)
     grand = combine_transcripts(map(lambda x: x[1], sams))
     print(f"{gene}: Found {len(grand)} SAM entries")
     res, allowed_transcripts = filter_specifity(

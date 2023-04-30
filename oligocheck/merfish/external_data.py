@@ -1,7 +1,7 @@
 # %%
 from functools import cache
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, Sequence, overload
 
 import mygene
 import polars as pl
@@ -50,7 +50,7 @@ class ExternalData:
         return self.gtf.filter(pl.col("transcript_id") == eid)[0, "transcript_id"]
 
     @cache
-    def all_transcripts(self, gene: str | None = None, *, eid: str | None = None) -> pl.Series:
+    def get_transcripts(self, gene: str | None = None, *, eid: str | None = None) -> pl.Series:
         if gene is not None:
             return self.gtf.filter(pl.col("gene_name") == gene)["transcript_id"]
         return self.gtf.filter(pl.col("gene_id") == eid)["transcript_id"]
@@ -80,7 +80,7 @@ class ExternalData:
         return self.gtf.filter(*args, **kwargs)
 
     @staticmethod
-    def parse_gtf(path: str | Path) -> pl.DataFrame:
+    def parse_gtf(path: str | Path, filters: Sequence[str] = ("transcript",)) -> pl.DataFrame:
         # fmt: off
         # To get the original keys.
         # list(reduce(lambda x, y: x | json.loads(y), jsoned['jsoned'].to_list(), {}).keys())
@@ -110,7 +110,7 @@ class ExternalData:
                 ],
                 dtypes=[pl.Utf8, pl.Utf8, pl.Utf8, pl.UInt32, pl.UInt32, pl.Utf8, pl.Utf8, pl.Utf8, pl.Utf8],
             )
-            .filter(pl.col("feature") == "transcript")
+            .filter(pl.col("feature").is_in(filters) if filters else pl.col("feature").is_not_null())
             .with_columns(
                 pl.concat_str(
                     [

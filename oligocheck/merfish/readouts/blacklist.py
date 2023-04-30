@@ -14,7 +14,7 @@ def calc_tm(row: pd.Series):
 
 def check_align(ensembl: ExternalData, df: pd.DataFrame, gene: str | None = None):
     if gene is not None:
-        tss = ensembl.all_transcripts(gene)
+        tss = ensembl.get_transcripts(gene)
         check = df[df.gene == gene]
         check = check[~check.transcript.isin(tss)].copy()
     else:

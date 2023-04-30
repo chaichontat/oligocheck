@@ -1,6 +1,28 @@
+import io
 import shlex
 import subprocess
 from pathlib import Path
+
+import polars as pl
+from Bio import AlignIO
+
+
+def gen_fastq(df: pl.DataFrame) -> io.StringIO:
+    f = io.StringIO()
+    for row in df.select(["name", "seq"]).iter_rows(named=True):
+        f.write(f"@{row['name']}\n")
+        f.write(row["seq"] + "\n")
+        f.write("+\n")
+        f.write("~" * len(row["seq"]) + "\n")
+    return f
+
+
+def gen_fasta(df: pl.DataFrame) -> io.StringIO:
+    f = io.StringIO()
+    for row in df.select(["name", "seq"]).iter_rows(named=True):
+        f.write(f">{row['name']}\n")
+        f.write(row["seq"] + "\n")
+    return f
 
 
 def run_bowtie(
@@ -25,6 +47,20 @@ def run_bowtie(
         encoding="ascii" if isinstance(stdin, str) else None,
         check=True,
     ).stdout
+
+
+def run_mafft(stdin: str | bytes) -> str:
+    return subprocess.run(
+        ["mafft-linsi", "--op", "2", "-"],
+        input=stdin,
+        encoding="ascii" if isinstance(stdin, str) else None,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
+def parse_mafft(s: str) -> AlignIO.MultipleSeqAlignment:
+    return AlignIO.read(io.StringIO(s), "fasta")
 
 
 if __name__ == "__main__":

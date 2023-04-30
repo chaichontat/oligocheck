@@ -34,7 +34,7 @@ def handle_overlap(
     for ts in tss:
         this_transcript = df.filter(pl.col("transcript_ori") == ts)
         if len(this_transcript) == 0:
-            print("No match found for", ts)
+            # print("No match found for", ts)
             continue
 
         forbidden = np.zeros(df.select(pl.col("pos_end")).max().item() + 1 + max(0, overlap), dtype=bool)
