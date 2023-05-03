@@ -5,6 +5,7 @@ from itertools import cycle
 import pandas as pd
 import primer3
 from Levenshtein import distance
+from oligocheck.seqcalc import tm_q5
 
 from oligocheck.sequtils import reverse_complement
 
@@ -94,7 +95,7 @@ conditions = dict(
     dntp_conc=0,
     dna_conc=3,
 )
-bridges = pd.read_csv("../../ps_bridges.tsv", sep="\t")
+bridges = pd.read_csv("ps_bridges.tsv", sep="\t")
 
 dTmarker = "TTACACTCCATCCACTCAA"
 selected = [
@@ -133,7 +134,7 @@ for seq in bridges.iloc[:900].itertuples():
 # Can only use 5 distances here since we're comparing 20-mers.
 ok = []
 for seq in bridges.iloc[900:].itertuples():
-    for cutted in slide(seq.seq, 35):
+    for cutted in slide(seq.seq, 30):
         breakout = False
         # Distance check
         for cutted_s in slide(cutted, 20):
@@ -146,7 +147,7 @@ for seq in bridges.iloc[900:].itertuples():
         else:
             ok.append(cutted)
 # %%
-sorted(list(zip(ok, map(primer3.calc_tm, ok))), key=lambda x: x[1])
+sorted(list(zip(ok, map(tm_q5, ok))), key=lambda x: x[1])
 # %%
 sp6 = reverse_complement("ACGTGACTGCTCC" + SP6)
 primary_rev = "CAAACTAACCTCCTTCTTCCTCCTTCCA"

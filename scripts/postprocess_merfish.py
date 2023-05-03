@@ -3,7 +3,7 @@ import json
 from functools import partial, reduce
 from itertools import cycle, permutations
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -17,13 +17,13 @@ from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.filtration import handle_overlap
 from oligocheck.merfish.readouts.blacklist import get_blacklist
 from oligocheck.merfish.readouts.codebook import CodebookPicker
+from oligocheck.seqcalc import tm_q5
 
 # from oligocheck.merfish.filtration import the_filter
 from oligocheck.sequtils import equal_distance, parse_sam, reverse_complement, tm_hybrid
 
 pl.Config.set_fmt_str_lengths(30)
 pl.Config.set_tbl_rows(30)
-wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
 
 
 def count_genes(df: pl.DataFrame) -> pl.DataFrame:
@@ -49,6 +49,8 @@ ensembl = ExternalData(
 
 # %%
 temp = []
+wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
+wants = ["Eef2"]
 for gene in wants:
     try:
         temp.append(pl.read_parquet(f"output/{gene}.parquet"))
@@ -148,7 +150,7 @@ def the_filter(df: pl.DataFrame, overlap: int = -1):
 
 
 # %%
-out_nool = the_filter(df.filter(pl.col("gene") == "Mbp"))
+out_nool = the_filter(df.filter(pl.col("gene") == "Eef2"))
 # %%
 
 
@@ -156,14 +158,19 @@ def stripplot(*args: Iterable[float], **kwargs: Any):
     import pandas as pd
     import seaborn as sns
 
+    sns.set()
+
     df = pd.concat(pd.DataFrame({"x": u, "y": str(i)}) for i, u in enumerate(args))
-    return sns.stripplot(data=df, **(dict(orient="h", alpha=0.6) | kwargs))
+    return sns.stripplot(data=df, x="x", y="y", **(dict(orient="h", alpha=0.6) | kwargs))
 
 
 counts = count_genes(out_nool)
 easy = counts.filter(pl.col("count") >= 45)["gene"]
 noteasy = counts.filter(pl.col("count") < 45)["gene"]
 print(counts)
+
+# %%
+stripplot(out_nool["pos_start"], df.filter(pl.col("gene") == "Eef2")["pos_start"])
 # %%
 res = the_filter(df.filter(pl.col("gene").is_in(noteasy)), overlap=15)
 print(count_genes(res))
@@ -201,42 +208,47 @@ blacklist = get_blacklist("zeroth_readouts.csv", ensembl)
 # %%
 
 
-def gen_full_probe(
-    df: pd.DataFrame,
-    readouts: pd.Series,
-    genes: Iterable[str],
-    mhd4: npt.NDArray[np.bool_],
-    header: str,
-    footer: str,
-    seed: int = 0,
-):
-    df = df[df.gene.isin(genes)].copy()
-    assert mhd4.shape[0] > mhd4.shape[1]
-    for gene, codeset in zip(genes, mhd4):
-        rand = np.random.RandomState(seed)
-        probes = df[df.gene == gene]
-        if len(probes) < 45:
-            print("Low probes for ", gene, len(probes))
-        code_ids = np.argwhere(codeset).squeeze()
-        codeseqs = readouts.iloc[code_ids].to_numpy().squeeze()
-        combi = []
-        for cs in permutations(zip(code_ids, codeseqs), 4):
-            cids = [x[0] for x in cs]
-            if (cids[0], cids[1]) in blacklist or (cids[2], cids[3]) in blacklist:
-                continue
-            combi.append(cs)
-        assert len(combi) > 4
+def stitch(seq: str, codes: Sequence[str]) -> str:
+    return codes[0] + "TT" + codes[1] + "TT" + seq + "TT" + codes[2] + "TT" + codes[3]
 
-        rand.shuffle(combi)
-        for (name, probe), codes in zip(probes.iterrows(), cycle(combi)):
-            df.loc[name, "constructed"] = reverse_complement(
-                codes[0][1] + "TT" + codes[1][1] + "TT" + probe.seq + "TT" + codes[2][1] + "TT" + codes[3][1]
-            )
-            df.loc[name, ["code1", "code2", "code3", "code4"]] = [x[0] for x in codes]
 
-    df.dropna(inplace=True)
-    df["constructed"] = df["constructed"].apply(lambda x: header + x + footer)
-    return df
+# def gen_full_probe(
+#     df: pd.DataFrame,
+#     readouts: pd.Series,
+#     genes: Iterable[str],
+#     mhd4: npt.NDArray[np.bool_],
+#     header: str,
+#     footer: str,
+#     seed: int = 0,
+#     f_stitch: Callable[[str, Sequence[str]], str] = stitch,
+# ):
+#     df = df[df.gene.isin(genes)].copy()
+#     assert mhd4.shape[0] > mhd4.shape[1]
+#     for gene, codeset in zip(genes, mhd4):
+#         rand = np.random.RandomState(seed)
+#         probes = df[df.gene == gene]
+#         if len(probes) < 45:
+#             print("Low probes for ", gene, len(probes))
+#         code_ids = np.argwhere(codeset).squeeze()
+#         codeseqs = readouts.iloc[code_ids].to_numpy().squeeze()
+#         combi = []
+#         for cs in permutations(zip(code_ids, codeseqs), 4):
+#             cids = [x[0] for x in cs]
+#             if (cids[0], cids[1]) in blacklist or (cids[2], cids[3]) in blacklist:
+#                 continue
+#             combi.append(cs)
+#         assert len(combi) > 4
+
+#         rand.shuffle(combi)
+#         for (name, probe), codes in zip(probes.iterrows(), cycle(combi)):
+#             # Reverse complemented here.
+#             # Always use mRNA sequence and readouts with Cs.
+#             df.loc[name, "constructed"] = reverse_complement(f_stitch(probe["seq"], [x[1] for x in codes]))
+#             df.loc[name, ["code1", "code2", "code3", "code4"]] = [x[0] for x in codes]
+
+#     df.dropna(inplace=True)
+#     df["constructed"] = df["constructed"].apply(lambda x: header + x + footer)
+#     return df
 
 
 # %%
@@ -252,7 +264,7 @@ out_nool = the_filter(df).filter(pl.col("priority") < 4).sort("pos_start")
 # %%
 zeroth_readout = pl.read_csv("zeroth_readouts.csv")
 ros = zeroth_readout[22][0, "seq"], zeroth_readout[23][0, "seq"]
-base = lambda r, seq: seq + "AA" + r + "AA" + r  # noqa: E731
+base = lambda r, seq: reverse_complement(r + "AT" + seq + "TA" + r)  # noqa: E731
 ross = [partial(base, r) for r in ros]
 
 
@@ -277,12 +289,9 @@ sam = run_bowtie(fastq.getvalue(), "data/mm39/mm39")
 # %%
 
 # from 18 for cellcycle
-for_bowtie = gen_full_probe(out, zeroth_readout, wants_filtered, y, header, "TATTTCCC")
+# for_bowtie = gen_full_probe(out, zeroth_readout, wants_filtered, y, header, "TATTTCCC")
 # %%
 
-
-# %%
-sam = parse_sam(sam)
 
 # %%
 
@@ -334,7 +343,7 @@ def check_align(df: pl.DataFrame, allowed_ts: dict[str, list[str]], match_dump_t
 
 
 checked = (
-    check_align(parse_cigar(sam), allowed, 17)
+    check_align(pipe(sam, parse_sam, parse_cigar), allowed, 17)
     .with_columns(mapped_to=pl.col("transcript").apply(ensembl.ts_to_gene))
     .with_columns(
         bad_tm=pl.col("tm_hybrid") > 33,
@@ -352,8 +361,9 @@ checked = (
         pl.col("horrible_tm").fill_null(False),
     )
     .filter(~pl.col("horrible_tm"))
+    .sort("bad_tm", "priority")
 )
-# %%
+checked
 
 
 def final_filter(df: pl.DataFrame):
@@ -365,20 +375,20 @@ def final_filter(df: pl.DataFrame):
         ],
         descending=False,
     ).with_columns(
-        final=pl.col("constructed") + "TATAGTGAGTCGTATTA" + footer
+        final=(pl.col("constructed") + "TATAGTGAGTCGTATTA" + footer),
     )  # ps_ir29
     # sortd["constructed"] += "TATAGTGAGTCGTATTAGACCGGTCT"  # ps_ir49
     return sortd
 
 
-finale = checked.groupby("gene").apply(final_filter)
+finale = checked[:66].groupby("gene").apply(final_filter)
 # finale = finale.astype(dict(code1=int, code2=int, code3=int, code4=int))
 # finale.to_csv("tricycle_probes.csv")
 
 # %%
 t7 = reverse_complement("TAATACGACTCACTATAGGG")
 
-assert all(finale.constructed.str.find(t7) != -1)
+assert all(finale["final"].str.contains(t7))
 
 codes = set()
 for s1, row in finale.groupby("gene")[["code1", "code2", "code3", "code4"]].agg(["unique"]).iterrows():

@@ -4,7 +4,6 @@ import logging
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -130,7 +129,7 @@ def filter_specifity(
     grand: pl.DataFrame,
     tss_gencode: Iterable[str] | None = None,
     threshold: float = 0.05,
-    allow_pseudogene: bool = False,
+    allow_pseudogene: bool = True,
 ):
     tsss = set(tss_all)
     tss_gencode = set(tss_gencode) if tss_gencode is not None else set()
@@ -241,7 +240,7 @@ def filter_specifity(
     if not res:
         print(f"No candidates found for {gene}")
         return pl.DataFrame()
-    return pl.concat(res), list(tsss)
+    return pl.concat(res), list(tsss | tss_pseudo)
 
 
 # def filter_candidates(res: pd.DataFrame, stringency: Stringency, n_cand: int = 300):
@@ -267,13 +266,13 @@ def calc_thermo(picked: pl.DataFrame):
             pl.col("seq")
             .apply(
                 lambda x: primer3.calc_hairpin_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
-                + formamide_correction(x)
+                + formamide_correction(x)  # type: ignore
             )
             .alias("hp"),
             pl.col("seq")
             .apply(
                 lambda x: primer3.calc_homodimer_tm(x, mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1)
-                + formamide_correction(x)
+                + formamide_correction(x)  # type: ignore
             )
             .alias("homodimer"),
             pl.col("seq").apply(tm_hybrid).alias("tm"),
