@@ -27,22 +27,27 @@ def gen_model(
     )
 
 
-def nonspecific_test(probe: str, seq: str, t: float = 37):
-    model = gen_model(t)
-    probe_ = Strand(reverse_complement("TTT" + probe + "TTT"), "probe")
+def nonspecific_test(
+    probe: str,
+    seq: str,
+    t: float = 37,
+    formamide: float = 30,
+    conc_seq: float = 1e-10,
+    conc_probe: float = 1e-9,
+):
+    model = gen_model(t, formamide=formamide)
+    probe_ = Strand(reverse_complement(probe), "probe")
     seq_ = Strand(seq, "seq")
-    t1 = Tube(
-        strands={seq_: 1e-10, probe_: 1e-9}, name="t1", complexes=SetSpec(max_size=2)
-    )
+    t1 = Tube(strands={seq_: conc_seq, probe_: conc_probe}, name="t1", complexes=SetSpec(max_size=2))
     # return tube_analysis(tubes=[t1], compute=["mfe"], model=model)
     result: Result = tube_analysis(tubes=[t1], compute=["mfe"], model=model)
     tube_result: TubeResult = result[t1]
     want = {}
     for complex, conc in tube_result.complex_concentrations.items():
         if complex.name == "(probe)":
-            want["hairpin"] = conc / 1e-9
+            want["hairpin"] = conc / conc_probe
         elif complex.name == "(probe+seq)" or complex.name == "(seq+probe)":
-            want["bound"] = conc / 1e-10
+            want["bound"] = conc / conc_seq
         elif complex.name == "(probe+probe)":
-            want["dimer"] = conc / 1e-9
+            want["dimer"] = conc / conc_probe
     return result, want

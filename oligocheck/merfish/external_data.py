@@ -39,6 +39,7 @@ class ExternalData:
 
     @cache
     def ts_to_gene(self, ts: str) -> str:
+        ts = ts.split(".")[0]
         try:
             return self.gtf.filter(pl.col("transcript_id") == ts)[0, "gene_name"]
         except pl.ComputeError:
@@ -57,6 +58,7 @@ class ExternalData:
 
     @cache
     def get_seq(self, eid: str) -> str:
+        eid = self.eid_to_ts(eid)
         res = self.fa[eid.split(".")[0]].seq
         if not res:
             raise ValueError(f"Could not find {eid}")
@@ -172,5 +174,4 @@ def get_rrna(path: str) -> set[str]:
     # return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
 
 
-get_rrna("data/mm39/Mus_musculus.GRCm39.ncrna.fa")
 # %%

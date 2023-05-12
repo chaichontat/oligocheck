@@ -9,11 +9,11 @@ from Bio import AlignIO
 
 def gen_fastq(df: pl.DataFrame) -> io.StringIO:
     f = io.StringIO()
-    for row in df.select(["name", "seq"]).iter_rows(named=True):
-        f.write(f"@{row['name']}\n")
-        f.write(row["seq"] + "\n")
+    for name, seq in df.select(["name", "seq"]).iter_rows():
+        f.write(f"@{name}\n")
+        f.write(seq + "\n")
         f.write("+\n")
-        f.write("~" * len(row["seq"]) + "\n")
+        f.write("~" * len(seq) + "\n")
     return f
 
 
@@ -26,10 +26,18 @@ def gen_fasta(df: pl.DataFrame) -> io.StringIO:
 
 
 def run_bowtie(
-    stdin: str | bytes, reference: str, capture_stderr: bool = False, seed_length: int = 17
+    stdin: str | bytes,
+    reference: str,
+    capture_stderr: bool = False,
+    seed_length: int = 15,
+    n_return: int = 100,
+    threads: int = 16,
+    threshold: int = 15,
 ) -> str:
     return subprocess.run(
         shlex.split(
+            # A base that matches receives a bonus of +2 be default.
+            # A mismatched base at a high-quality position in the read receives a penalty of -6 by default.
             # --no-hd No SAM header
             # -k 100 report up to 100 alignments per read
             # -D 20 consecutive seed extension attempts can "fail" before Bowtie 2 moves on
@@ -37,9 +45,11 @@ def run_bowtie(
             # -L 17 seed length
             # -i C,2 Seed interval, every 2 bp
             # --score-min G,1,4 f(x) = 1 + 4*ln(read_length)
+            # --score-min L,0,-0.6 f(x) = -0.6*read_length
             f"bowtie2 -x {reference} -U - "
-            f"--no-hd -t -k 100 --local -D 20 -R 3 "
-            f"-N 0 -L {seed_length} -i C,2 --score-min G,1,4"
+            f"--no-hd -t {f'-k {n_return}' if n_return > 0 else '-a'} --local -D 20 -R 3 "
+            f"--score-min L,{threshold*2},0 --mp 1,1 --ignore-quals "
+            f"-N 0 -L {seed_length} -i C,2 -p {threads}"
         ),
         input=stdin,
         stdout=subprocess.PIPE,

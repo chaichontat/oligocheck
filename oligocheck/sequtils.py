@@ -101,7 +101,7 @@ def equal_distance(total: int, choose: int) -> npt.NDArray[np.int_]:
     return np.linspace(0, total - 1, choose).astype(np.int_)
 
 
-def plot_local_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: Any):
+def plot_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: Any):
     """Plot windowed GC content on a designated Matplotlib ax."""
     if len(seq) < window_size:
         raise ValueError("Sequence shorter than window size")
@@ -119,26 +119,62 @@ def plot_local_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: A
 
 
 def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
-    file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
+    # file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
 
-    return (
-        pl.read_csv(
-            StringIO("\n".join(file_read)),
-            has_header=False,
-            new_columns=[
-                "name",
-                "flag",
-                "transcript",
-                "pos",
-                "mapq",
-                "cigar",
-                "rnext",
-                "pnext",
-                "tlen",
-                "seq",
-            ],
-        )
+    # s = (
+    #     pl.DataFrame(dict(strs=[sam]))
+    #     .lazy()
+    #     .with_columns(pl.col("strs").str.split("\n"))
+    #     .explode("strs")
+    #     .with_columns(pl.col("strs").str.strip().str.split("\t").arr.slice(0, 10))
+    #     .with_row_count("id")
+    #     .explode("strs")
+    #     .with_columns(col_nm="string_" + pl.arange(0, pl.count()).cast(pl.Utf8).str.zfill(2).over("id"))
+    #     .sort(["col_nm", "id"])
+    #     .collect()
+    # )
+
+    # faster than pivot
+    key_optional = {
+        "AS": "aln_score",
+        "XS": "aln_score_best",
+        "XN": "n_ambiguous",
+        "XM": "n_mismatches",
+        "XO": "n_opens",
+        "XG": "n_extensions",
+        "NM": "edit_distance",
+        "MD": "mismatched_reference",
+        "YT": "pair_state",
+    }
+
+    df = (
+        pl.read_csv(StringIO(sam), separator="\n", has_header=False)
         .lazy()
+        .with_row_count("id")
+        .with_columns(temp=pl.col("column_1").str.split_exact("\t", 9))
+        .unnest("temp")
+        .rename(
+            {
+                f"field_{i}": x
+                for i, x in enumerate(
+                    ["name", "flag", "transcript", "pos", "mapq", "cigar", "rnext", "pnext", "tlen", "seq"]
+                )
+            }
+        )
+        .with_columns(
+            flag=pl.col("flag").cast(pl.UInt16),
+            pos=pl.col("pos").cast(pl.UInt32),
+            mapq=pl.col("mapq").cast(pl.UInt8),
+            aln_score=pl.col("column_1").str.extract(r"AS:i:(\d+)").cast(pl.UInt16),
+            aln_score_best=pl.col("column_1").str.extract(r"XS:i:(\d+)").cast(pl.UInt16),
+            n_ambiguous=pl.col("column_1").str.extract(r"XN:i:(\d+)").cast(pl.UInt16),
+            n_mismatches=pl.col("column_1").str.extract(r"XM:i:(\d+)").cast(pl.UInt16),
+            n_opens=pl.col("column_1").str.extract(r"XO:i:(\d+)").cast(pl.UInt16),
+            n_extensions=pl.col("column_1").str.extract(r"XG:i:(\d+)").cast(pl.UInt16),
+            edit_distance=pl.col("column_1").str.extract(r"NM:i:(\d+)").cast(pl.UInt16),
+            mismatched_reference=pl.col("column_1").str.extract(r"MD:Z:(\S+)"),
+        )
+        .drop(["column_1", "mapq", "rnext", "pnext", "tlen"])
         .with_columns(
             [
                 pl.when(pl.col("transcript").str.contains(r"(.*)\.\d+"))
@@ -167,6 +203,7 @@ def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
         )
         .collect()
     )
+    return df
 
 
 # %%
