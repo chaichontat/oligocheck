@@ -3,7 +3,7 @@ import json
 from functools import partial, reduce
 from itertools import cycle, permutations
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Collection, Iterable, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -44,13 +44,13 @@ def filter_gene(df: pl.DataFrame, gene: str) -> pl.DataFrame:
 ensembl = ExternalData(
     "data/mm39/gencode_vM32_transcripts_all.parquet",
     path="data/mm39/Mus_musculus.GRCm39.109.gtf",
-    fasta="data/mm39/combi.fa",
+    fasta="data/mm39/combi.fa.gz",
 )
 
 # %%
 temp = []
 wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
-wants = ["Eef2"]
+# wants = ["Eef2"]
 for gene in wants:
     try:
         temp.append(pl.read_parquet(f"output/{gene}.parquet"))
@@ -296,6 +296,73 @@ sam = run_bowtie(fastq.getvalue(), "data/mm39/mm39")
 # %%
 
 
+def check_specificity(
+    s: pl.DataFrame | Collection[str],
+    seed_length: int = 13,
+    reference: str = "data/mm39/mm39",
+    threshold: int = 15,
+    n_return: int = -1,
+):
+    if isinstance(s, Collection):
+        fastq = pl.DataFrame(dict(name=[f"{i:04d}" for i in range(len(s))], seq=s))
+    else:
+        fastq = s
+
+    fastq = fastq.with_columns(pl.col("seq").str.replace_all(" ", ""))
+
+    sam = run_bowtie(
+        gen_fastq(fastq).getvalue(),
+        reference,
+        seed_length=seed_length,
+        n_return=n_return,
+        threshold=threshold,
+    )
+    t = parse_sam(sam, split_name=False)
+
+    # if parse_all_cigar:
+    #     t = t.join(
+    #         t[["id", "cigar"]]
+    #         .with_columns(cigar=pl.col("cigar").str.extract_all(r"(\d+)M"))
+    #         .explode("cigar")
+    #         .with_columns(pl.col("cigar").str.extract(r"(\d+)").cast(pl.UInt8))
+    #         .groupby("id")
+    #         .agg(match=pl.col("cigar").sum()),
+    #         on="id",
+    #         how="left",
+    #     )
+    # else:
+    #     t = t.with_columns(match=pl.col("cigar").str.extract(r"(\d+)M").cast(pl.UInt8))
+
+    y = (
+        t.with_columns(
+            transcript_id=pl.col("transcript").str.extract(r"(ENSMUST.+)\.")
+            # .arr.eval(pl.element().cast(pl.UInt8))
+            # .max()
+        ).join(fpkm, left_on="transcript_id", right_on="transcript_id(s)", how="left")
+        # .with_columns(matchname=pl.col("transcript").apply(gtf_all.ts_to_gene), tm=pl.col("seq").apply(tm_fish))
+    )
+
+    y = y.join(
+        y[["id", "mismatched_reference"]]
+        .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
+        .explode("mismatched_reference")
+        .with_columns(pl.col("mismatched_reference").cast(pl.UInt8))
+        .groupby("id")
+        .agg(
+            match=pl.col("mismatched_reference").sum(),
+            match_max=pl.col("mismatched_reference").max(),
+        ),
+        on="id",
+        how="left",
+    )
+
+    y = y.with_columns(
+        worst_match=pl.col("match").max().over("name"),
+        worst_match_max=pl.col("match_max").max().over("name"),
+    )
+    return y
+
+
 def parse_cigar(df: pl.DataFrame):
     """
     Extract the position and length of matches.
@@ -406,3 +473,4 @@ count_genes(finale)
 # %%# %%
 # %%# %%
 # %%# %%
+# pl.read_csv("all_probes.csv", has_header=False).with_columns(p2=pl.col( "column_2").str.slice(43,20).apply(reverse_complement)).join(zero, left_on="p2", right_on="seq", how="left")['name'].value_counts().sort("name")
