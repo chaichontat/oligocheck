@@ -43,23 +43,20 @@ fn has_nonconsecutive_c(combination: &[usize]) -> bool {
     }
     false
 }
-fn generate_combinations(
-    output_file: &str,
-    first_char: usize,
-    second_char: usize,
-) -> std::io::Result<()> {
+fn generate_combinations(output_file: &str, first_twos: (usize, usize)) -> std::io::Result<()> {
     let mut file = File::create(output_file)?;
     let mut combination: Vec<usize> = vec![0; LENGTH];
+    let first_char = first_twos.0;
+    let second_char = first_twos.1;
     combination[0] = first_char;
     combination[1] = second_char;
-    // let mut last_written: String = "".to_string();
+
     let mut i = 0;
     loop {
         let current = combination
             .iter()
             .map(|&j| NUCLEOTIDES[j])
             .collect::<String>();
-        // let prev = &last_written;
 
         if !has_forbidden_substrings(&current)
             && ok_gc_content(&combination)
@@ -80,7 +77,6 @@ fn generate_combinations(
                 )
                 .as_bytes(),
             )?;
-            // last_written = current.clone()
         }
 
         let mut carry = true;
@@ -110,9 +106,9 @@ fn main() {
         .flat_map(|a| (0..3).map(move |b| (a, b)))
         .collect::<Vec<_>>();
 
-    nucleotide_combinations.par_iter().for_each(|(a, b)| {
-        let file_name = format!("combinations_{}{}.txt", a, b);
-        let result = generate_combinations(&file_name, *a, *b);
+    nucleotide_combinations.par_iter().for_each(|&x| {
+        let file_name = format!("combinations_{}{}.txt", x.0, x.1);
+        let result = generate_combinations(&file_name, x);
 
         if let Err(e) = result {
             eprintln!("Error writing to file {}: {}", file_name, e);
