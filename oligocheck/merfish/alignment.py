@@ -7,9 +7,9 @@ import polars as pl
 from Bio import AlignIO
 
 
-def gen_fastq(df: pl.DataFrame) -> io.StringIO:
+def gen_fastq(names: pl.Series, seqs: pl.Series) -> io.StringIO:
     f = io.StringIO()
-    for name, seq in df.select(["name", "seq"]).iter_rows():
+    for name, seq in zip(names, seqs):
         f.write(f"@{name}\n")
         f.write(seq + "\n")
         f.write("+\n")
@@ -25,6 +25,17 @@ def gen_fasta(df: pl.DataFrame) -> io.StringIO:
     return f
 
 
+def gen_bowtie_index(stdin: str | bytes) -> bytes:
+    return subprocess.run(
+        shlex.split("bowtie2-build -"),
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="ascii" if isinstance(stdin, str) else None,
+        check=True,
+    ).stdout
+
+
 def run_bowtie(
     stdin: str | bytes,
     reference: str,
@@ -33,7 +44,7 @@ def run_bowtie(
     n_return: int = 100,
     threads: int = 16,
     threshold: int = 15,
-) -> str:
+) -> bytes:
     return subprocess.run(
         shlex.split(
             # A base that matches receives a bonus of +2 be default.

@@ -118,7 +118,7 @@ def plot_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: Any):
     ax.set_ylabel("GC (%)")
 
 
-def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
+def parse_sam(sam: str | bytes, split_name: bool = True) -> pl.DataFrame:
     # file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
 
     # s = (

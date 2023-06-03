@@ -131,3 +131,6 @@ dmypy.json
 data/
 temp/
 output/
+
+target/
+*.txt
