@@ -31,6 +31,7 @@ reportUnknownMemberType = false
 reportUnknownVariableType = false
 reportUntypedFunctionDecorator = false
 reportUnusedImport = false
+reportUnknownLambdaType = false
 reportUnusedVariable = "warning"
 typeCheckingMode = "strict"
 

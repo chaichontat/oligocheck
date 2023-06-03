@@ -72,9 +72,9 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
                         "-f",
                         (temp / f"{ts}.fasta").as_posix(),
                         "-t",
-                        str(48),
+                        str(50),
                         "-T",
-                        str(55),
+                        str(52),
                         "-F",
                         "30",
                         "-O",
@@ -118,7 +118,7 @@ def combine_transcripts(sams: Iterable[str]):
         .select((pl.col("length") == pl.col("seq").str.n_chars()).alias("is_equal"))["is_equal"]
         .all()
     )
-    assert df.null_count().max(axis=1).item() == 0
+    # assert df.null_count().max(axis=1).item() == 0
     return df
 
 

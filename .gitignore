@@ -134,3 +134,6 @@ output/
 
 target/
 *.txt
+*.csv
+*.parquet
+*.sam

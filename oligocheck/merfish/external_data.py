@@ -23,12 +23,13 @@ mg = mygene.MyGeneInfo()
 class ExternalData:
     def __init__(self, cache: Path | str, *, path: Path | str, fasta: Path | str) -> None:
         self.fa = pyfastx.Fasta(fasta, key_func=lambda x: x.split(" ")[0].split(".")[0])
+        self._ts_gene_map: dict[str, str] | None = None
 
         if Path(cache).exists():
             self.gtf: pl.DataFrame = pl.read_parquet(cache)
-            return
-        self.gtf = self.parse_gtf(path)
-        self.gtf.write_parquet(cache)
+        else:
+            self.gtf = self.parse_gtf(path)
+            self.gtf.write_parquet(cache)
 
     @cache
     def gene_info(self, gene: str) -> pl.DataFrame:
@@ -41,10 +42,9 @@ class ExternalData:
     @cache
     def ts_to_gene(self, ts: str) -> str:
         ts = ts.split(".")[0]
-        try:
-            return self.gtf.filter(pl.col("transcript_id") == ts)[0, "gene_name"]
-        except pl.ComputeError:
-            return ts
+        if self._ts_gene_map is None:
+            self._ts_gene_map = {k: v for k, v in zip(self.gtf["transcript_id"], self.gtf["gene_name"])}
+        return self._ts_gene_map.get(ts, ts)
 
     @cache
     def eid_to_ts(self, eid: str) -> str:

@@ -28,7 +28,7 @@ class OverlapWeighted:
         # The return value i is such that all e in a[:i] have e < x, and all e in a[i:] have e >= x.
         # So if x already appears in the list, a.insert(i, x) will insert just before the leftmost x already there.
         # Guarantees that overlap = 0 means no overlap
-        return bisect_left(self.end[: j - 1], self.start[j - 1] - self.overlap)
+        return bisect_left(self.end[: j - 1], self.start[j - 1] + self.overlap)
 
     def dp(self, j: int) -> int:
         if self.opt[j] == -1:
