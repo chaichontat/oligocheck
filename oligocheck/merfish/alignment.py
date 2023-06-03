@@ -43,7 +43,7 @@ def run_bowtie(
     n_return: int = 100,
     threads: int = 16,
     threshold: int = 15,
-) -> bytes:
+) -> str:
     return subprocess.run(
         shlex.split(
             # A base that matches receives a bonus of +2 be default.

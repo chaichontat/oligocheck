@@ -51,3 +51,17 @@ def nonspecific_test(
         elif complex.name == "(probe+probe)":
             want["dimer"] = conc / conc_probe
     return result, want
+
+
+def secondary_structure(
+    probe: str,
+    t: float = 37,
+    formamide: float = 30,
+    conc_probe: float = 1e-9,
+):
+    model = gen_model(t, formamide=formamide)
+    probe_ = Strand(reverse_complement(probe), "probe")
+    t1 = Tube(strands={probe_: conc_probe}, name="t1", complexes=SetSpec(max_size=2))
+    # return tube_analysis(tubes=[t1], compute=["mfe"], model=model)
+    result: Result = tube_analysis(tubes=[t1], compute=["mfe"], model=model)
+    return result
