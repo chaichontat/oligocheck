@@ -17,21 +17,20 @@ def gen_fastq(names: pl.Series, seqs: pl.Series) -> io.StringIO:
     return f
 
 
-def gen_fasta(df: pl.DataFrame) -> io.StringIO:
+def gen_fasta(names: pl.Series, seqs: pl.Series) -> io.StringIO:
     f = io.StringIO()
-    for row in df.select(["name", "seq"]).iter_rows(named=True):
-        f.write(f">{row['name']}\n")
-        f.write(row["seq"] + "\n")
+    for name, seq in zip(names, seqs):
+        f.write(f">{name}\n")
+        f.write(seq + "\n")
     return f
 
 
-def gen_bowtie_index(stdin: str | bytes) -> bytes:
+def gen_bowtie_index(stdin: str, path: str, name: str) -> bytes:
+    (Path(path) / (name + ".fasta")).write_text(stdin)
     return subprocess.run(
-        shlex.split("bowtie2-build -"),
-        input=stdin,
+        shlex.split(f"bowtie2-build {path}/{name}.fasta {path}/{name}"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        encoding="ascii" if isinstance(stdin, str) else None,
         check=True,
     ).stdout
 

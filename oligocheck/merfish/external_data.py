@@ -1,4 +1,5 @@
 # %%
+import gzip
 from functools import cache
 from pathlib import Path
 from typing import Any, Sequence, overload
@@ -148,7 +149,7 @@ class ExternalData:
 def get_rrna(path: str) -> set[str]:
     # Get tRNA and rRNA
     out = []
-    ncrna = SeqIO.parse(path, "fasta")
+    ncrna = SeqIO.parse(gzip.open(path, "rt") if path.endswith(".gz") else path, "fasta")
     # Example line
     # ENSMUST00000104605.4 ncrna chromosome:GRCm39:Y:1308273:1308377:-1 gene:ENSMUSG00000077793.4 gene_biotype:snRNA transcript_biotype:snRNA gene_symbol:Gm25565 description:predicted gene, 25565 [Source:MGI Symbol;Acc:MGI:5455342]
     for line in ncrna:
