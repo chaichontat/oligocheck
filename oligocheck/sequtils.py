@@ -2,7 +2,6 @@
 import random
 import re
 from io import StringIO
-from pathlib import Path
 from typing import Any
 
 import colorama
@@ -118,7 +117,7 @@ def plot_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: Any):
     ax.set_ylabel("GC (%)")
 
 
-def parse_sam(sam: str | bytes, split_name: bool = True) -> pl.DataFrame:
+def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
     # file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
 
     # s = (
@@ -207,3 +206,11 @@ def parse_sam(sam: str | bytes, split_name: bool = True) -> pl.DataFrame:
 
 
 # %%
+def stripplot(**kwargs: Any) -> Axes:
+    import pandas as pd
+    import seaborn as sns
+
+    sns.set()
+
+    df = pd.concat(pd.DataFrame({"x": v, "y": k}) for k, v in kwargs.items())
+    return sns.stripplot(data=df, x="x", y="y", **(dict(orient="h", alpha=0.6)))
