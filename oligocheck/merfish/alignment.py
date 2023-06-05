@@ -43,6 +43,7 @@ def run_bowtie(
     n_return: int = 100,
     threads: int = 16,
     threshold: int = 15,
+    fasta: bool = False,
 ) -> str:
     return subprocess.run(
         shlex.split(
@@ -58,7 +59,7 @@ def run_bowtie(
             # --score-min L,0,-0.6 f(x) = -0.6*read_length
             f"bowtie2 -x {reference} -U - "
             f"--no-hd -t {f'-k {n_return}' if n_return > 0 else '-a'} --local -D 20 -R 3 "
-            f"--score-min L,{threshold*2},0 --mp 1,1 --ignore-quals "
+            f"--score-min L,{threshold*2},0 --mp 1,1 --ignore-quals {'-f ' if fasta else ''}"
             f"-N 0 -L {seed_length} -i C,2 -p {threads}"
         ),
         input=stdin,

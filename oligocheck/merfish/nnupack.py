@@ -36,7 +36,7 @@ def nonspecific_test(
     conc_probe: float = 1e-9,
 ):
     model = gen_model(t, formamide=formamide)
-    probe_ = Strand(reverse_complement(probe), "probe")
+    probe_ = Strand(probe, "probe")
     seq_ = Strand(seq, "seq")
     t1 = Tube(strands={seq_: conc_seq, probe_: conc_probe}, name="t1", complexes=SetSpec(max_size=2))
     # return tube_analysis(tubes=[t1], compute=["mfe"], model=model)
