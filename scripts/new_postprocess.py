@@ -11,16 +11,17 @@ import click
 import polars as pl
 
 from oligocheck.algorithms import find_overlap, find_overlap_weighted
-from oligocheck.merfish.alignment import run_bowtie
+from oligocheck.merfish.alignment import gen_fasta, gen_fastq, run_bowtie
+from oligocheck.merfish.crawler import crawler
 from oligocheck.merfish.external_data import ExternalData, get_rrna
 from oligocheck.seqcalc import hp_fish, tm_fish
 
 # from oligocheck.merfish.filtration import the_filter
-from oligocheck.sequtils import parse_sam
+from oligocheck.sequtils import parse_sam, tm_hybrid
 
-sys.setrecursionlimit(1500)
+sys.setrecursionlimit(2000)
 pl.Config.set_fmt_str_lengths(100)
-pl.Config.set_tbl_rows(30)
+pl.Config.set_tbl_rows(100)
 
 fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
 
@@ -62,56 +63,20 @@ trna_rna_kmers = set(
 
 @profile
 def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
-    tss = [f"{gene}_{ts}" for ts in tss]
-
+    out = []
     for ts in tss:
-        if not (temp / f"{ts}.fasta").exists():
-            (temp / f"{ts}.fasta").write_text(f">{ts}\n{gtf.get_seq(ts.split('_')[1])}")
-
-    [(temp / f"{ts}.fastq").unlink(missing_ok=True) for ts in tss]
-
-    with ThreadPoolExecutor() as executor:
-        list(
-            executor.map(
-                lambda ts: subprocess.run(
-                    [
-                        "python",
-                        "oligocheck/merfish/blockParse.py",
-                        "-f",
-                        (temp / f"{ts}.fasta").as_posix(),
-                        "-t",
-                        str(50),
-                        "-T",
-                        str(52),
-                        "-F",
-                        "30",
-                        "-O",
-                    ],
-                    check=True,
-                ),
-                tss,
+        seq = gtf.get_seq(ts)
+        res = crawler(seq, prefix=f"{gene}_{ts}")
+        out.append(
+            run_bowtie(
+                gen_fastq(res["name"], res["seq"]).getvalue(),
+                "data/mm39/mm39",
+                seed_length=15,
+                threshold=17,
+                n_return=-1,
             )
         )
-    while not all((temp / f"{ts}.fastq").exists() for ts in tss):
-        print("Waiting for files to flush to disk...")
-        time.sleep(0.2)
-
-    with ThreadPoolExecutor() as executor:
-        res = executor.map(
-            lambda ts: (
-                ts,
-                run_bowtie(
-                    (temp / f"{ts}.fastq").read_text(),
-                    "data/mm39/mm39",
-                    seed_length=12,
-                    threshold=16,
-                    n_return=-1,
-                ),
-            ),
-            tss,
-        )
-
-    return list(res)
+    return out
 
 
 def get_pseudogenes(gene: str, y: pl.DataFrame):
@@ -140,9 +105,9 @@ def get_pseudogenes(gene: str, y: pl.DataFrame):
     return ok["transcript"]
 
 
-def filter_match(y: pl.DataFrame, acceptable_tss: Iterable[str], match: int = 21, match_max: int = 16):
+def filter_match(y: pl.DataFrame, acceptable_tss: Iterable[str], match: float = 0.8, match_max: int = 17):
     nogo = y.filter(
-        (pl.col("match").gt(match))
+        (pl.col("match").gt(pl.col("length") * match))
         & (pl.col("match_max").gt(match_max))
         & ~pl.col("transcript").str.contains("|".join([f"({x})" for x in acceptable_tss]))
     )
@@ -176,11 +141,14 @@ def handle_overlap(
             ddf.filter(criterion).with_columns(priority=pl.lit(priority, dtype=pl.UInt8)), on="index"
         )
         priority -= 1
-    df = ddf.filter(pl.col("priority") > 0).collect()
+    ddf = ddf.collect()
+    ddf.write_parquet(f"output/{gene}_filtered.parquet")
+    df = ddf.filter(pl.col("priority") > 0)
 
     selected_global = set()
     for ts in tss:
         this_transcript = df.filter(pl.col("transcript_ori") == ts)
+        print(len(this_transcript))
         if not len(this_transcript):
             continue
 
@@ -230,11 +198,11 @@ def the_filter(df: pl.DataFrame, overlap: int = -1):
                 group,
                 criteria=[
                     # fmt: off
-                    pl.col("tm").is_between(50, 54) & (pl.col("oks") > 4) & (pl.col("hp") < 35),
-                    pl.col("tm").is_between(50, 54) & (pl.col("oks") > 3) & (pl.col("hp") < 35),
-                    pl.col("tm").is_between(49, 56) & (pl.col("oks") > 3) & (pl.col("hp") < 40),
-                    pl.col("tm").is_between(49, 56) & (pl.col("oks") > 2) & (pl.col("hp") < 40),
-                    pl.col("tm").is_between(49, 56) & (pl.col("oks") > 2) & (pl.col("hp") < 45),
+                    (pl.col("oks") > 4) & (pl.col("hp") < 35)& pl.col("tm").is_between(50, 54),
+                    (pl.col("oks") > 3) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54),
+                    (pl.col("oks") > 3) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
+                    (pl.col("oks") > 2) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
+                    (pl.col("oks") > 2) & (pl.col("hp") < 45) & pl.col("tm").is_between(49, 56),
                     # fmt: on
                 ],
                 overlap=overlap,
@@ -244,7 +212,7 @@ def the_filter(df: pl.DataFrame, overlap: int = -1):
 
 
 # %%
-def run(gene: str, overlap: int = -2, allow_pseudo: bool = False):
+def run(gene: str, overlap: int = -2, allow_pseudo: bool = True):
     Path("temp").mkdir(exist_ok=True)
     # wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
     # gene = wants[7]
@@ -252,8 +220,7 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = False):
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
     longest = max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
 
-    y = parse_sam(block_bowtie(gene, [longest], Path("temp"))[0][1])
-    y.write_parquet(f"output/{gene}_all.parquet")
+    y = parse_sam(block_bowtie(gene, [longest], Path("temp"))[0])
     tss_pseudo = get_pseudogenes(gene, y) if allow_pseudo else pl.Series()
     offtargets = (
         y["transcript"]
@@ -261,8 +228,6 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = False):
         .sort("counts", descending=True)
         .with_columns(name=pl.col("transcript").apply(gtf_all.ts_to_gene))
     )
-
-    offtargets.write_parquet(f"output/{gene}_offtargets.parquet")
 
     y = y.join(
         y[["id", "mismatched_reference"]]
@@ -278,9 +243,19 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = False):
         how="left",
     )
 
+    y.write_parquet(f"output/{gene}_all.parquet")
+    offtargets.write_parquet(f"output/{gene}_offtargets.parquet")
+
+    ff = filter_match(y, [*tss_all, *tss_pseudo], match=0.8, match_max=18)
+    if len(tss_pseudo):
+        names_with_pseudo = ff.filter(pl.col("transcript").str.contains("|".join(tss_pseudo))).rename(
+            dict(transcript="maps_to_pseudo")
+        )[["name", "maps_to_pseudo"]]
+
+        ff = ff.join(names_with_pseudo, on="name", how="left")
+
     ff = (
-        filter_match(y, [*tss_all, *tss_pseudo], match=21, match_max=17)
-        .lazy()
+        ff.lazy()
         .filter("is_ori_seq")
         .with_columns(
             [
@@ -297,15 +272,16 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = False):
         .with_columns(
             [
                 (pl.col("gc_content").is_between(0.35, 0.65)).alias("ok_gc"),
-                pl.col("seq").apply(tm_fish).alias("tm") - 0.65 * 30,
+                pl.col("seq").apply(tm_hybrid).alias("tm"),
                 pl.col("seq").apply(hp_fish).alias("hp") - 0.65 * 30,
             ]
         )
         .with_columns(oks=pl.sum(pl.col("^ok_.*$")))
         .collect()
     )
-
+    # ff.unique("name").write_parquet(f"output/{gene}_filtered.parquet")
     final = the_filter(ff, overlap=overlap)
+    assert (final["flag"] == 0).all()
     final.write_parquet(f"output/{gene}_final.parquet")
 
 
@@ -332,5 +308,4 @@ def main(gene: str, overlap: int = -2, allow_pseudo: bool = False, debug: bool =
 
 
 if __name__ == "__main__":
-    main()
     main()
