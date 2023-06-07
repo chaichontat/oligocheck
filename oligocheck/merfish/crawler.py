@@ -3,11 +3,12 @@
 import polars as pl
 import primer3
 
-from oligocheck.sequtils import gc_content, tm_hybrid
+from oligocheck.seqcalc import tm_hybrid
+from oligocheck.sequtils import gc_content
 
 
 def crawler(seq: str, prefix: str) -> pl.DataFrame:
-    minmax = [24, 41]
+    minmax = [25, 41]
     gc_limit = [0.3, 0.7]
     j = minmax[0]
     hp_limit = 40 + 0.65 * 30
@@ -26,7 +27,7 @@ def crawler(seq: str, prefix: str) -> pl.DataFrame:
                 j += 1
                 continue
 
-            if (tm := tm_hybrid(seq[i:j])) > 49:
+            if (tm := tm_hybrid(seq[i:j])) > 51:
                 if (
                     primer3.calc_hairpin_tm(seq[i:j], mv_conc=330, dv_conc=0, dntp_conc=0, dna_conc=1)
                     < hp_limit

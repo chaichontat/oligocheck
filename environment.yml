@@ -1,0 +1,15 @@
+name: oligocheck
+
+channels:
+  - conda-forge
+  - bioconda
+
+dependencies:
+  - python=3.10
+  - biopython
+  - bowtie2
+  - click
+  - pip:
+      - .
+      - mygene
+      - pyfastx

@@ -11,7 +11,7 @@ import polars as pl
 
 from oligocheck.merfish.alignment import gen_fastq, run_bowtie
 from oligocheck.merfish.crawler import crawler
-from oligocheck.merfish.external_data import ExternalData, get_rrna
+from oligocheck.merfish.external_data import ExternalData, find_aliases, get_rrna
 from oligocheck.merfish.filtration import count_match, the_filter
 from oligocheck.seqcalc import hp_fish, tm_hybrid, tm_match
 from oligocheck.sequtils import parse_sam
@@ -237,3 +237,6 @@ def main(gene: str, ignore_revcomp: bool, overlap: int = -2, allow_pseudo: bool 
 
 if __name__ == "__main__":
     main()
+# %%
+
+# %%

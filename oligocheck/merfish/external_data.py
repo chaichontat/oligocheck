@@ -2,7 +2,7 @@
 import gzip
 from functools import cache
 from pathlib import Path
-from typing import Any, Sequence, overload
+from typing import Any, Iterable, Sequence, TypedDict, cast, overload
 
 import mygene
 import polars as pl
@@ -37,7 +37,10 @@ class ExternalData:
 
     @cache
     def gene_to_eid(self, gene: str) -> str:
-        return self.gene_info(gene)[0, "gene_id"]
+        try:
+            return self.gene_info(gene)[0, "gene_id"]
+        except pl.ComputeError:
+            raise ValueError(f"Could not find {gene}")
 
     @cache
     def ts_to_gene(self, ts: str) -> str:
@@ -173,6 +176,35 @@ def get_rrna(path: str) -> set[str]:
     #         f.write(f">{row.transcript_id}\n{row.seq}\n")
 
     # return set(pd.read_table(path, header=None)[0].str.split(">", expand=True)[1].dropna())
+
+
+# %%
+class GeneDict(TypedDict):
+    gene: list[str]
+    symbol: str
+
+
+class ResDict(TypedDict):
+    out: list[dict[str, str | float]]
+    dup: list[str]
+    missing: list[str]
+
+
+def find_aliases(genes: Iterable[str], species: str = "mouse"):
+    res = mg.querymany(
+        genes, scopes="alias,symbol", fields="symbol,ensembl.gene", species=species, returnall=True
+    )
+    out = {}
+    print(res["out"])
+    for x in res["out"]:
+        if "ensembl" not in x:
+            continue
+        if isinstance(x["ensembl"], dict):
+            eid = [x["ensembl"]["gene"]]
+        else:
+            eid = [y["gene"] for y in x["ensembl"]]
+        out[x["query"]] = GeneDict(gene=eid, symbol=x["symbol"])
+    return out, cast(ResDict, res)  # missing, dup
 
 
 # %%
