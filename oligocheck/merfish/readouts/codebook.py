@@ -22,7 +22,7 @@ class CodebookPicker:
     @staticmethod
     def _find_optimalish(mhd4: npt.NDArray[np.bool_], seed: int, fpkm: Sized):
         rmhd4 = CodebookPicker._gen_codebook(mhd4, seed)
-        res = rmhd4[: len(fpkm)] * np.array(fpkm)[:, np.newaxis]
+        res = rmhd4[: len(fpkm)] * np.array(fpkm)
         tocalc = res.sum(axis=0)
         normed = tocalc / tocalc.sum()
         return -np.sum(normed * np.log2(normed)), tocalc

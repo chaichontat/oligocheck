@@ -1,9 +1,7 @@
 # %%
 import logging
-import subprocess
+import re
 import sys
-import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
 
@@ -11,19 +9,19 @@ import click
 import numpy as np
 import polars as pl
 
-from oligocheck.algorithms import find_overlap, find_overlap_weighted
-from oligocheck.merfish.alignment import gen_fasta, gen_fastq, run_bowtie
+from oligocheck.merfish.alignment import gen_fastq, run_bowtie
 from oligocheck.merfish.crawler import crawler
 from oligocheck.merfish.external_data import ExternalData, get_rrna
-from oligocheck.merfish.filtration import the_filter
-from oligocheck.seqcalc import hp_fish, tm_fish
-from oligocheck.sequtils import parse_sam, tm_hybrid
+from oligocheck.merfish.filtration import count_match, the_filter
+from oligocheck.seqcalc import hp_fish, tm_hybrid, tm_match
+from oligocheck.sequtils import parse_sam
 
 sys.setrecursionlimit(5000)
 pl.Config.set_fmt_str_lengths(100)
 pl.Config.set_tbl_rows(100)
 
 fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
+
 
 try:
     profile
@@ -72,8 +70,8 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
                 gen_fastq(res["name"], res["seq"]).getvalue(),
                 "data/mm39/mm39",
                 seed_length=15,
-                threshold=17,
-                n_return=-1,
+                threshold=18,
+                n_return=500,
             )
         )
     return out, res
@@ -105,54 +103,54 @@ def get_pseudogenes(gene: str, y: pl.DataFrame):
     return ok["transcript"]
 
 
-def filter_match(y: pl.DataFrame, acceptable_tss: Iterable[str], match: float = 0.8, match_max: float = 0.6):
+def filter_match(y: pl.DataFrame, acceptable_tss: pl.Series, match: float = 0.8, match_max: float = 0.7):
     nogo = y.filter(
         (pl.col("match").gt(pl.col("length") * match))
         & (pl.col("match_max").gt(pl.col("length") * match_max))
-        & ~pl.col("transcript").str.contains("|".join([f"({x})" for x in acceptable_tss]))
+        & ~pl.col("transcript").is_in(acceptable_tss)
     )
-    return y.filter(~pl.col("name").is_in(nogo["name"]))
+
+    nogo_soft = (
+        y.filter(
+            pl.col("match_max").is_between(pl.col("length") * 0.5, pl.col("length") * match_max)
+            & pl.col("match_max").gt(15)
+        )
+        .with_columns(
+            tm_match=pl.struct(["seq", "cigar", "mismatched_reference"]).apply(
+                lambda x: tm_match(x["seq"], x["cigar"], x["mismatched_reference"])
+            )
+        )
+        .filter(pl.col("tm_match").gt(40))
+        .drop("tm_match")
+    )
+
+    return y.filter(~pl.col("name").is_in(pl.concat([nogo["name"], nogo_soft["name"]])))
 
 
 # %%
 
 
 # %%
-def run(gene: str, overlap: int = -2, allow_pseudo: bool = True):
-    Path("temp").mkdir(exist_ok=True)
-    if Path(f"output/{gene}_final.parquet").exists():
-        return
+def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp: bool = False):
+    Path("output").mkdir(exist_ok=True)
     # wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
     # gene = wants[7]
+    if Path(f"output/{gene}_final.parquet").exists():
+        return
     tss_gencode = gtf.filter_gene(gene)["transcript_id"]
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
+    if not len(tss_gencode):
+        raise ValueError(f"Gene {gene} not found in GENCODE.")
     longest = max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
 
     if not Path(f"output/{gene}_all.parquet").exists():
         bt, crawled = block_bowtie(gene, [longest], Path("temp"))
-        y = parse_sam(bt[0])
+        y = count_match(parse_sam(bt[0]))
         offtargets = (
             y["transcript"]
             .value_counts()
             .sort("counts", descending=True)
             .with_columns(name=pl.col("transcript").apply(gtf_all.ts_to_gene))
-        )
-
-        y: pl.DataFrame = (
-            y.join(
-                y[["id", "mismatched_reference"]]
-                .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
-                .explode("mismatched_reference")
-                .with_columns(pl.col("mismatched_reference").cast(pl.UInt8))
-                .groupby("id")
-                .agg(
-                    match=pl.col("mismatched_reference").sum(),
-                    match_max=pl.col("mismatched_reference").max(),
-                ),
-                on="id",
-                how="left",
-            ).with_columns(revcomped=pl.col("flag").map(lambda col: np.bitwise_and(col, 16) > 0))
-            # .filter(~pl.col("revcomped"))
         )
 
         y.write_parquet(f"output/{gene}_all.parquet")
@@ -162,15 +160,21 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True):
         y = pl.read_parquet(f"output/{gene}_all.parquet")
         offtargets = pl.read_parquet(f"output/{gene}_offtargets.parquet")
 
+    if ignore_revcomp:
+        print("Ignoring revcomped reads.", len(y), end=" ")
+        y = y.filter(~pl.col("flag").map(lambda col: np.bitwise_and(col, 16) > 0))
+        print(len(y))
     tss_pseudo = get_pseudogenes(gene, y) if allow_pseudo else pl.Series()
-    ff = filter_match(y, [*tss_all, *tss_pseudo], match=0.8, match_max=0.6)
+    print(tss_pseudo)
+    pl.DataFrame(dict(transcript=[*tss_all, *tss_pseudo])).write_csv(f"output/{gene}_acceptable_tss.csv")
+    ff = filter_match(y, pl.Series([*tss_all, *tss_pseudo]), match=0.8, match_max=0.8)
 
     if len(tss_pseudo):
-        names_with_pseudo = ff.filter(pl.col("transcript").str.contains("|".join(tss_pseudo))).rename(
+        names_with_pseudo = ff.filter(pl.col("transcript").is_in(tss_pseudo)).rename(
             dict(transcript="maps_to_pseudo")
         )[["name", "maps_to_pseudo"]]
     else:
-        names_with_pseudo = pl.DataFrame({"name": ff["name"].unique(), "maps_to_pseudo": pl.lit(False)})
+        names_with_pseudo = pl.DataFrame({"name": ff["name"].unique(), "maps_to_pseudo": ""})
 
     ff = (
         ff.lazy()
@@ -198,10 +202,14 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True):
         .collect()
         .join(names_with_pseudo, on="name", how="left")
     )
-    ff.unique("name").write_parquet(f"output/{gene}_filtered.parquet")
+    # print(ff)
+    # ff.unique("name").write_parquet(f"output/{gene}_filtered.parquet")
     final = the_filter(ff, gtf, overlap=overlap)
     assert not (final["flag"].to_numpy() & 16).any()
-    final.write_parquet(f"output/{gene}_final.parquet")
+    print(final)
+    final.write_parquet(
+        f"output/{gene}_final.parquet" if overlap < 0 else f"output/{gene}_final_overlapped.parquet"
+    )
 
 
 @click.command()
@@ -209,14 +217,15 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True):
 # @click.option("--output", "-o", type=click.Path(), default="output/")
 @click.option("--debug", "-d", is_flag=True)
 # @click.option("--allow-pseudo", "-p", is_flag=True)
+@click.option("--ignore-revcomp", "-r", is_flag=True)
 @click.option("--overlap", "-O", type=int, default=-2)
-def main(gene: str, overlap: int = -2, allow_pseudo: bool = True, debug: bool = False):
+def main(gene: str, ignore_revcomp: bool, overlap: int = -2, allow_pseudo: bool = True, debug: bool = False):
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        run(gene, overlap=overlap, allow_pseudo=allow_pseudo)
+        run(gene, overlap=overlap, allow_pseudo=allow_pseudo, ignore_revcomp=ignore_revcomp)
     except Exception as e:
         raise Exception(f"Failed to run {gene}") from e
 

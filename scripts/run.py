@@ -1,10 +1,21 @@
 # %%
+import asyncio
+import logging
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
-import pandas as pd
+
+# from prefect import flow, task
+# from prefect.client import get_client
+
+
+# async def set_limit():
+#     async with get_client() as client:
+#         await client.create_concurrency_limit(tag="parallel", concurrency_limit=8)
+
 
 wants = [
     "Pclaf",
@@ -115,31 +126,37 @@ wants = [
 ]
 
 
-def runpls(gene: str, stringency: str):
+# @task(tags=["parallel"], name="First pass", task_run_name="first-pass-{gene}")
+def runpls(gene: str):
     # if not Path(f"output/{gene}_high.parquet").exists():
-    # print("running", gene)
-    subprocess.run(["genmer", gene, stringency, "--output", "output/"], check=True)
+    logging.info("running", gene)
+    subprocess.run(
+        ["python", "scripts/new_postprocess.py", gene], check=True, capture_output=True, cwd=os.getcwd()
+    )
+    logging.info(f"ran {gene}")
+
+
+# @flow
+def run(genes: list[str]):
+    return [runpls.submit(gene=gene) for gene in genes]
 
 
 @click.command()
 @click.argument("genes_path", type=click.Path(exists=True))
-@click.argument("stringency")
-def hello(genes_path: str, stringency: str):
-    genes: list[str] = pd.read_csv(genes_path, header=None, dtype=str)[0]
-    sr = [gene for gene in genes if not Path(f"output/{gene}_{stringency}.parquet").exists()]
+def main(genes_path: str):
+    print(os.getcwd())
+    # asyncio.run(set_limit())
+    genes: list[str] = list(filter(lambda x: x, Path(genes_path).read_text().splitlines()))
+    sr = genes  # [gene for gene in genes if not Path(f"output/{gene}.parquet").exists()]
     print(f"running {len(sr)} genes")
+    print(sr)
+    # run(genes)
 
-    with ThreadPoolExecutor(8) as executor:
-        executor.map(runpls, sr, [stringency] * len(sr))
+    with ThreadPoolExecutor(32) as executor:
+        for x in as_completed([executor.submit(runpls, gene) for gene in sr]):
+            print("ok")
+            x.result()
 
 
 if __name__ == "__main__":
-    hello()
-
-# out = {}
-# for gene in wants:
-#     print(gene)
-#     out[gene] = run(gene, "high")
-# %%
-# %%
-# %%
+    main()

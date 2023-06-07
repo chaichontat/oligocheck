@@ -167,26 +167,3 @@ final = (
 )
 final.write_csv("generator/readouts.csv")
 # %%
-
-fusedreadout = []
-for i in range(len(final)):
-    for j in range(len(final)):
-        fusedreadout.append(
-            dict(
-                name=f"{final[i, 'id']}_{final[j, 'id']}",
-                seq="AA" + final[i, "seq"] + "AA" + final[j, "seq"] + "AA",
-            )
-        )
-
-fused = pl.DataFrame(fusedreadout)
-y = parse_sam(
-    run_bowtie(
-        gen_fastq(fused["name"], fused["seq"]).getvalue(),
-        "data/humouse/humouse",
-        seed_length=15,
-        n_return=50,
-        threshold=18,
-    ),
-    split_name=False,
-)
-# %%

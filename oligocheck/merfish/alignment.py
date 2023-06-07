@@ -2,12 +2,13 @@ import io
 import shlex
 import subprocess
 from pathlib import Path
+from typing import Iterable
 
 import polars as pl
 from Bio import AlignIO
 
 
-def gen_fastq(names: pl.Series, seqs: pl.Series) -> io.StringIO:
+def gen_fastq(names: Iterable[str], seqs: Iterable[str]) -> io.StringIO:
     f = io.StringIO()
     for name, seq in zip(names, seqs):
         f.write(f"@{name}\n")
@@ -41,7 +42,7 @@ def run_bowtie(
     capture_stderr: bool = False,
     seed_length: int = 15,
     n_return: int = 100,
-    threads: int = 16,
+    threads: int = 32,
     threshold: int = 15,
     fasta: bool = False,
 ) -> str:

@@ -12,6 +12,8 @@ from Bio.Seq import Seq
 from Bio.SeqUtils import MeltingTemp as mt
 from matplotlib.axes import Axes
 
+from oligocheck.merfish.pairwise import pairwise_alignment
+
 table = str.maketrans("ACGTacgt ", "TGCAtgca ")
 name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
 
@@ -54,16 +56,6 @@ def reverse_complement(seq: str) -> str:
     return seq.translate(table)[::-1]
 
 
-def formamide_correction(seq: str, fmd: float = 30) -> float:
-    return (0.453 * (gc_content(seq) / 100.0) - 2.88) * formamide_molar(fmd)
-
-
-def tm_hybrid(seq: str) -> float:
-    return mt.Tm_NN(Seq(seq), nn_table=mt.R_DNA_NN1, Na=390, Tris=0, Mg=0, dNTPs=0) + formamide_correction(
-        seq
-    )
-
-
 def pcr(seq: str, primer: str, primer_rc: str) -> str:
     loc = seq.find(primer)
     if loc == -1:
@@ -90,10 +82,6 @@ def gc_content(seq: str) -> float:
 
 def slide(x: str, n: int = 20):
     return [x[i : i + n] for i in range(len(x) - n + 1)]
-
-
-def formamide_molar(percent: float = 30) -> float:
-    return percent * 10 * 1.13 / 45.04  # density / molar mass
 
 
 def equal_distance(total: int, choose: int) -> npt.NDArray[np.int_]:
