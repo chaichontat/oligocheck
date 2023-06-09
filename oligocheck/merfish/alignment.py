@@ -7,6 +7,8 @@ from typing import Iterable
 import polars as pl
 from Bio import AlignIO
 
+from oligocheck.merfish.external_data import ExternalData
+
 
 def gen_fastq(names: Iterable[str], seqs: Iterable[str]) -> io.StringIO:
     f = io.StringIO()
@@ -18,7 +20,7 @@ def gen_fastq(names: Iterable[str], seqs: Iterable[str]) -> io.StringIO:
     return f
 
 
-def gen_fasta(names: pl.Series, seqs: pl.Series) -> io.StringIO:
+def gen_fasta(names: Iterable[str], seqs: Iterable[str]) -> io.StringIO:
     f = io.StringIO()
     for name, seq in zip(names, seqs):
         f.write(f">{name}\n")
@@ -83,6 +85,14 @@ def run_mafft(stdin: str | bytes) -> str:
 
 def parse_mafft(s: str) -> AlignIO.MultipleSeqAlignment:
     return AlignIO.read(io.StringIO(s), "fasta")
+
+
+def gen_rrna_trna(gtf: ExternalData):
+    rrna = gtf.gtf.filter(pl.col("gene_biotype") == "rRNA")
+    if not len(rrna):
+        raise ValueError("No rRNA found in GTF. Use Ensembl GTF.")
+    seqs = [gtf.get_seq(x) for x in rrna["transcript_id"]]
+    Path("data/mm39/rrna.fasta").write_text(gen_fasta(rrna["transcript_id"], seqs).getvalue())
 
 
 if __name__ == "__main__":

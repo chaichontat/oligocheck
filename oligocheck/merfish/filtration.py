@@ -71,7 +71,7 @@ def handle_overlap(
             if not len(run):
                 continue
 
-            priorities = (5 - run["priority"]).to_list()
+            priorities = (len(criteria) + 1 - run["priority"]).to_list()
             try:
                 if i == 1:
                     ols = find_overlap(run["pos_start"], run["pos_end"], overlap=overlap)
@@ -99,10 +99,11 @@ def the_filter(df: pl.DataFrame, gtf: ExternalData, overlap: int = -1) -> pl.Dat
                 group,
                 criteria=[
                     # fmt: off
-                    (pl.col("oks") > 4) & (pl.col("hp") < 35)& pl.col("tm").is_between(50, 54),
+                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54) & pl.col("maps_to_pseudo").is_null(),
+                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54),
                     (pl.col("oks") > 3) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54),
-                    (pl.col("oks") > 3) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
                     (pl.col("oks") > 2) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
+                    (pl.col("oks") > 1) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
                     # fmt: on
                 ],
                 overlap=overlap,

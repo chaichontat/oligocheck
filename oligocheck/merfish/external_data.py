@@ -50,9 +50,17 @@ class ExternalData:
         return self._ts_gene_map.get(ts, ts)
 
     @cache
+    def ts_to_tsname(self, eid: str) -> str:
+        eid = eid.split(".")[0]
+        try:
+            return self.gtf.filter(pl.col("transcript_id") == eid)[0, "transcript_name"]
+        except pl.ComputeError:
+            return eid
+
+    @cache
     def eid_to_ts(self, eid: str) -> str:
         eid = eid.split(".")[0]
-        return self.gtf.filter(pl.col("transcript_id") == eid)[0, "transcript_id"]
+        return self.gtf.filter(pl.col("gene_id") == eid)[0, "transcript_id"]
 
     @cache
     def get_transcripts(self, gene: str | None = None, *, eid: str | None = None) -> pl.Series:
@@ -62,7 +70,6 @@ class ExternalData:
 
     @cache
     def get_seq(self, eid: str) -> str:
-        eid = self.eid_to_ts(eid)
         res = self.fa[eid.split(".")[0]].seq
         if not res:
             raise ValueError(f"Could not find {eid}")
@@ -91,7 +98,7 @@ class ExternalData:
         # To get the original keys.
         # list(reduce(lambda x, y: x | json.loads(y), jsoned['jsoned'].to_list(), {}).keys())
         attr_keys = (
-            "gene_id", "transcript_id", "gene_type", "gene_name", "transcript_type",
+            "gene_id", "transcript_id", "gene_type", "gene_name", "gene_biotype", "transcript_type",
             "transcript_name", "level", "transcript_support_level", "mgi_id", "tag",
             # "havana_gene", "havana_transcript", "protein_id", "ccdsid", "ont",
         )
@@ -192,7 +199,7 @@ class ResDict(TypedDict):
 
 def find_aliases(genes: Iterable[str], species: str = "mouse"):
     res = mg.querymany(
-        genes, scopes="alias,symbol", fields="symbol,ensembl.gene", species=species, returnall=True
+        genes, scopes="symbol,alias", fields="symbol,ensembl.gene", species=species, returnall=True
     )
     out = {}
     print(res["out"])

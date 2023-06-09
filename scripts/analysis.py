@@ -11,6 +11,18 @@ from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_st
 from oligocheck.seqcalc import tm_fish, tm_hybrid, tm_match
 from oligocheck.sequtils import reverse_complement, stripplot
 
+
+class GeneFrame(pl.DataFrame):
+    def __init__(self, df: pl.DataFrame):
+        self._df = df._df
+
+    def gene(self, gene: str):
+        return self.filter(pl.col("gene") == gene)
+
+    def count(self):
+        return self.groupby("gene").agg(pl.count()).sort("count")
+
+
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
     path="data/mm39/Mus_musculus.GRCm39.109.gtf",
@@ -19,9 +31,10 @@ gtf_all = ExternalData(
 pl.Config.set_fmt_str_lengths(100)
 pl.Config.set_tbl_rows(100)
 
+genes = Path("panels/motorcortex_converted.txt").read_text().splitlines()
+
 dfs, sams, filtereds, offtargets, overlapped = {}, {}, {}, {}, {}
-for file in Path("output").glob("*_final.parquet"):
-    gene = file.stem.split("_")[0]
+for gene in genes:
     dfs[gene] = pl.read_parquet(f"output/{gene}_final.parquet")
     sams[gene] = pl.read_parquet(f"output/{gene}_all.parquet")
     filtereds[gene] = pl.read_parquet(f"output/{gene}_filtered.parquet")
@@ -30,6 +43,9 @@ for file in Path("output").glob("*_final.parquet"):
         overlapped[gene] = pl.read_parquet(f"output/{gene}_final_overlapped.parquet")
     except FileNotFoundError:
         pass
+dfs = dfs | overlapped
+
+dfs = GeneFrame(pl.concat(dfs.values()))
 # %%
 
 sams["Abi3"].filter(
@@ -55,10 +71,11 @@ for x in (
     print(x["id"])
     print(tm_match(x["seq"], x["cigar"], x["mismatched_reference"]))
 # %%
-length = {k: len(v) for k, v in dfs.items()}
+counts = dfs.groupby("gene").agg(pl.count())
+# length = {k: len(v) for k, v in counts.iter_rows()}
 # filter length less than 30
-short = {k: v for k, v in length.items() if v < 30}
-print(len(length), len(short))
+short = {k: v for k, v in counts.iter_rows() if v < 40}
+print(len(counts), len(short))
 # %%
 stripplot(all=sam["pos_end"], filtered=filtered["pos_end"], s=df["pos_end"])
 

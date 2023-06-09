@@ -9,7 +9,7 @@ import click
 import numpy as np
 import polars as pl
 
-from oligocheck.merfish.alignment import gen_fastq, run_bowtie
+from oligocheck.merfish.alignment import gen_fastq, gen_rrna_trna, run_bowtie
 from oligocheck.merfish.crawler import crawler
 from oligocheck.merfish.external_data import ExternalData, find_aliases, get_rrna
 from oligocheck.merfish.filtration import count_match, the_filter
@@ -69,7 +69,7 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
             run_bowtie(
                 gen_fastq(res["name"], res["seq"]).getvalue(),
                 "data/mm39/mm39",
-                seed_length=15,
+                seed_length=13,
                 threshold=18,
                 n_return=500,
             )
@@ -77,7 +77,7 @@ def block_bowtie(gene: str, tss: Iterable[str], temp: Path):
     return out, res
 
 
-def get_pseudogenes(gene: str, y: pl.DataFrame):
+def get_pseudogenes(gene: str, y: pl.DataFrame) -> tuple[pl.Series, pl.Series]:
     counts = (
         y.groupby("transcript")
         .count()
@@ -98,9 +98,12 @@ def get_pseudogenes(gene: str, y: pl.DataFrame):
             if counts[0, "FPKM"] is not None and counts[0, "FPKM"] > 1.0
             else pl.lit(True)
         )
-        & (pl.col("transcript_name").str.starts_with(gene) | pl.col("transcript_name").str.starts_with("Gm"))
+        & (
+            pl.col("transcript_name").str.starts_with(gene + "-ps")
+            | pl.col("transcript_name").str.starts_with("Gm")
+        )
     )
-    return ok["transcript"]
+    return ok["transcript"], ok["transcript_name"]
 
 
 def filter_match(y: pl.DataFrame, acceptable_tss: pl.Series, match: float = 0.8, match_max: float = 0.7):
@@ -110,21 +113,19 @@ def filter_match(y: pl.DataFrame, acceptable_tss: pl.Series, match: float = 0.8,
         & ~pl.col("transcript").is_in(acceptable_tss)
     )
 
-    nogo_soft = (
-        y.filter(
-            pl.col("match_max").is_between(pl.col("length") * 0.5, pl.col("length") * match_max)
-            & pl.col("match_max").gt(15)
+    tm_offtarget = y.filter(
+        pl.col("match_max").is_between(pl.col("length") * 0.5, pl.col("length") * match_max + 0.01)
+        & pl.col("match_max").gt(15)
+    ).with_columns(
+        tm_offtarget=pl.struct(["seq", "cigar", "mismatched_reference"]).apply(
+            lambda x: tm_match(x["seq"], x["cigar"], x["mismatched_reference"])
         )
-        .with_columns(
-            tm_match=pl.struct(["seq", "cigar", "mismatched_reference"]).apply(
-                lambda x: tm_match(x["seq"], x["cigar"], x["mismatched_reference"])
-            )
-        )
-        .filter(pl.col("tm_match").gt(40))
-        .drop("tm_match")
     )
+    nogo_soft = tm_offtarget.filter(pl.col("tm_offtarget").gt(40))
 
-    return y.filter(~pl.col("name").is_in(pl.concat([nogo["name"], nogo_soft["name"]])))
+    print(f"Found {len(nogo.unique('name'))} hard and {len(nogo_soft.unique('name'))} soft no-gos.")
+
+    return y.filter(~pl.col("name").is_in(nogo["name"]) & ~pl.col("name").is_in(nogo_soft["name"]))
 
 
 # %%
@@ -135,17 +136,29 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
     Path("output").mkdir(exist_ok=True)
     # wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
     # gene = wants[7]
-    if Path(f"output/{gene}_final.parquet").exists():
-        return
+    # if Path(f"output/{gene}_final.parquet").exists():
+    #     return
     tss_gencode = gtf.filter_gene(gene)["transcript_id"]
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
+    print(
+        gtf_all.filter_gene(gene)[["transcript_id", "transcript_name"]]
+        .join(fpkm, left_on="transcript_id", right_on="transcript_id(s)", how="left")
+        .sort("FPKM", descending=True)
+        .with_columns(
+            is_gencode=pl.when(pl.col("transcript_id").is_in(tss_gencode)).then(True).otherwise(False)
+        )
+        .sort(["is_gencode", "transcript_name"], descending=True)
+    )
+
     if not len(tss_gencode):
         raise ValueError(f"Gene {gene} not found in GENCODE.")
-    longest = max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
+    # max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
+    canonical = gtf_all.filter_gene(gene).filter(pl.col("tag") == "Ensembl_canonical")[0, "transcript_id"]
 
     if not Path(f"output/{gene}_all.parquet").exists():
-        bt, crawled = block_bowtie(gene, [longest], Path("temp"))
+        bt, crawled = block_bowtie(gene, [canonical], Path("temp"))
         y = count_match(parse_sam(bt[0]))
+
         offtargets = (
             y["transcript"]
             .value_counts()
@@ -160,21 +173,59 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
         y = pl.read_parquet(f"output/{gene}_all.parquet")
         offtargets = pl.read_parquet(f"output/{gene}_offtargets.parquet")
 
+    unique = y.unique("name")
+    tr = count_match(
+        parse_sam(
+            run_bowtie(
+                gen_fastq(unique["name"], unique["seq"]).getvalue(),
+                "data/mm39/trcombi",
+                seed_length=10,
+                threshold=14,
+            )
+        )
+    )
+    nogo = (
+        tr.filter(pl.col("transcript") != "")
+        .groupby("name")
+        .agg(pl.max("match_max"))
+        .filter(pl.col("match_max") > 14)
+    )
+    print(f"{gene} has {len(nogo)} candidates removed from rRNA/tRNA homology.")
+    y = y.filter(~pl.col("name").is_in(nogo["name"]))
+
     if ignore_revcomp:
         print("Ignoring revcomped reads.", len(y), end=" ")
         y = y.filter(~pl.col("flag").map(lambda col: np.bitwise_and(col, 16) > 0))
         print(len(y))
-    tss_pseudo = get_pseudogenes(gene, y) if allow_pseudo else pl.Series()
-    print(tss_pseudo)
+
+    print(
+        y.groupby("transcript")
+        .count()
+        .filter(pl.col("count") > 0.1 * len(unique))
+        .sort("count", descending=True)
+        .with_columns(name=pl.col("transcript").apply(gtf_all.ts_to_tsname))
+    )
+
+    tss_pseudo, pseudo_name = get_pseudogenes(gene, y) if allow_pseudo else (pl.Series(), pl.Series())
+    print("Pseudogenes included", pseudo_name.to_list())
     pl.DataFrame(dict(transcript=[*tss_all, *tss_pseudo])).write_csv(f"output/{gene}_acceptable_tss.csv")
-    ff = filter_match(y, pl.Series([*tss_all, *tss_pseudo]), match=0.8, match_max=0.8)
+    ff = filter_match(y, pl.Series([*tss_all, *tss_pseudo]), match=0.9, match_max=0.8)
 
     if len(tss_pseudo):
-        names_with_pseudo = ff.filter(pl.col("transcript").is_in(tss_pseudo)).rename(
-            dict(transcript="maps_to_pseudo")
-        )[["name", "maps_to_pseudo"]]
+        names_with_pseudo = (
+            ff.filter(pl.col("transcript").is_in(tss_pseudo))
+            .rename(dict(transcript="maps_to_pseudo"))[["name", "maps_to_pseudo"]]
+            .unique("name")
+        )
     else:
         names_with_pseudo = pl.DataFrame({"name": ff["name"].unique(), "maps_to_pseudo": ""})
+
+    isoforms = (
+        ff.filter(pl.col("transcript").is_in(tss_gencode))[["name", "transcript"]]
+        .with_columns(isoforms=pl.col("transcript").apply(gtf_all.ts_to_tsname))[["name", "isoforms"]]
+        .groupby("name")
+        .all()
+    )
 
     ff = (
         ff.lazy()
@@ -201,11 +252,11 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
         .with_columns(oks=pl.sum(pl.col("^ok_.*$")))
         .collect()
         .join(names_with_pseudo, on="name", how="left")
+        .join(isoforms, on="name", how="left")
     )
     # print(ff)
     # ff.unique("name").write_parquet(f"output/{gene}_filtered.parquet")
-    final = the_filter(ff, gtf, overlap=overlap)
-    assert not (final["flag"].to_numpy() & 16).any()
+    final = the_filter(ff, gtf, overlap=overlap).filter(pl.col("flag") & 16 == 0)
     print(final)
     final.write_parquet(
         f"output/{gene}_final.parquet" if overlap < 0 else f"output/{gene}_final_overlapped.parquet"

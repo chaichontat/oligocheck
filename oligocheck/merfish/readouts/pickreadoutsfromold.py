@@ -57,13 +57,13 @@ picked2.sort("name").with_row_count("id", 1).write_csv("data/readout_ref_filtere
 
 fusedreadout = []
 for i in range(len(picked)):
-    for j in range(len(picked)):
-        fusedreadout.append(
-            dict(
-                name=f"{picked[i, 'name']}_{picked[j, 'name']}",
-                seq="TT" + picked[i, "seq"] + "TT" + picked[j, "seq"] + "TT",
-            )
+    # for j in range(len(picked)):
+    fusedreadout.append(
+        dict(
+            name=f"{picked[i, 'name']}_{picked[i, 'name']}",
+            seq="TT" + picked[i, "seq"] + "TT" + picked[i, "seq"] + "TT",
         )
+    )
 
 fused = pl.DataFrame(fusedreadout)
 y = count_match(
@@ -110,4 +110,21 @@ y = count_match(
 
 
 y.filter(pl.col("name").ne(pl.col("split1")) & pl.col("name").ne(pl.col("split2")))
+
+
+# %%
+def wells(n: int):
+    assert n > 0
+    col = (n - 1) // 8
+    row = (n - 1) % 8
+    return f"{chr(ord('A') + row)}{col + 1}"
+
+
+df = (
+    pl.read_csv("data/readout_ref_filtered.csv")
+    .filter(pl.col("name").str.starts_with("RS"))
+    .with_columns(pl.col("id").apply(wells).alias("Well Position"))
+    .with_columns(seq="/5AmMC6/" + pl.col("seq") + "/3AmMO/")
+).rename({"name": "Name", "seq": "Sequence"})[["Well Position", "Name", "Sequence"]]
+df.write_excel("data/readout_ref_filtered.xlsx")
 # %%
