@@ -10,7 +10,7 @@ from oligocheck.geneframe import GeneFrame
 from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_structure
 from oligocheck.seqcalc import tm_fish, tm_hybrid, tm_match
-from oligocheck.sequtils import reverse_complement, stripplot, gc_content
+from oligocheck.sequtils import gc_content, reverse_complement, stripplot
 
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
@@ -53,7 +53,7 @@ counts = dfs.count()
 short = {k: v for k, v in counts.iter_rows() if v < 45}
 print(len(counts), len(short))
 # %%
-target = "Calb2"
+target = "Sgcd"
 stripplot(
     all=sams[target]["pos_end"],
     filtered=filtereds[target]["pos_end"],
@@ -68,7 +68,7 @@ stripplot(
 # %%
 def runpls(gene: str):
     subprocess.run(
-        ["python", "scripts/new_postprocess.py", gene, "-O", "5"],
+        ["python", "scripts/new_postprocess.py", gene, "-O", "20"],
         check=True,
         capture_output=True,
     )
@@ -100,6 +100,12 @@ for gene in short.keys():
 # %%
 stripplot(all=sam["pos_end"], filtered=filtered["pos_end"], s=df["pos_end"])
 
+# %%
+from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_structure
+
+dfs.gene("Slc17a6").with_columns(
+    secondary=pl.col("seq").apply(lambda x: secondary_structure(x)["(probe)"][3])
+)
 # %%
 
 sams["Abi3"].filter(

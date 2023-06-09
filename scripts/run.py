@@ -43,7 +43,7 @@ def check_gene_names(genes: list[str]):
     ok: list[str] = []
     for gene in genes:
         try:
-            gtf.gene_to_eid(gene.capitalize())
+            gtf.gene_to_eid(gene)
             ok.append(gene)
         except ValueError:
             print(f"Gene {gene} not found in gtf")
@@ -52,7 +52,7 @@ def check_gene_names(genes: list[str]):
     if len(res["dup"]) or len(res["missing"]):
         raise ValueError(f"Duplicated aliases {res['dup']} or missing aliases {res['missing']}")
 
-    return ok + [x["symbol"] for x in converted.values()], converted
+    return ok + [x["symbol"] for x in converted.values()], {k: v["symbol"] for k, v in converted.items()}
 
 
 # %%
@@ -60,13 +60,15 @@ def check_gene_names(genes: list[str]):
 
 @click.command()
 @click.argument("genes_path", type=click.Path(exists=True))
-def main(genes_path: str):
+def main(genes_path: str | Path):
     # asyncio.run(set_limit())
+    genes_path = Path(genes_path)
     genes: list[str] = list(filter(lambda x: x, Path(genes_path).read_text().splitlines()))
     sr = genes  # [gene for gene in genes if not Path(f"output/{gene}.parquet").exists()]
     sr, converted = check_gene_names(sr)
     if len(converted):
-        Path("output/converted.json").write_text(json.dumps(converted))
+        (genes_path.parent / (genes_path.stem + "_convert.json")).write_text(json.dumps(converted))
+        (genes_path.parent / (genes_path.stem + "_converted.txt")).write_text("\n".join(sorted(sr)))
     print(f"running {len(sr)} genes")
     print(sr)
     # run(genes)
