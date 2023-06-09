@@ -1,3 +1,4 @@
+import numpy as np
 import polars as pl
 
 from oligocheck.algorithms import find_overlap, find_overlap_weighted
@@ -21,18 +22,15 @@ def count_match(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def handle_overlap(
-    ensembl: ExternalData,
     df: pl.DataFrame,
     criteria: list[pl.Expr],
-    overlap: int = -1,
+    overlap: int = -2,
     n: int = 100,
 ):
     if len(gene := df.select(pl.col("gene").unique())) > 1:
         raise ValueError("More than one gene in filtered")
     gene = gene.item()
     df = df.sort(by=["is_ori_seq", "transcript_ori", "pos_end", "tm"], descending=[True, False, False, True])
-    eid = ensembl.gene_to_eid(gene)
-    tss = tuple(ensembl.filter(pl.col("gene_id") == eid)["transcript_id"])
 
     if not criteria:
         criteria = [pl.col("*")]
@@ -49,6 +47,7 @@ def handle_overlap(
     df = ddf.filter(pl.col("priority") > 0)
 
     selected_global = set()
+    tss = df["transcript_ori"].unique().to_list()
     for ts in tss:
         this_transcript = df.filter(pl.col("transcript_ori") == ts)
         print(len(this_transcript))
@@ -71,7 +70,7 @@ def handle_overlap(
             if not len(run):
                 continue
 
-            priorities = (len(criteria) + 1 - run["priority"]).to_list()
+            priorities = np.sqrt(len(criteria) + 1 - run["priority"])
             try:
                 if i == 1:
                     ols = find_overlap(run["pos_start"], run["pos_end"], overlap=overlap)
@@ -90,23 +89,24 @@ def handle_overlap(
     return df.filter(pl.col("index").is_in(selected_global))
 
 
-def the_filter(df: pl.DataFrame, gtf: ExternalData, overlap: int = -1) -> pl.DataFrame:
+def the_filter(df: pl.DataFrame, overlap: int = -1) -> pl.DataFrame:
     out = []
     for _, group in df.groupby("gene"):
         out.append(
             handle_overlap(
-                gtf,
                 group,
                 criteria=[
                     # fmt: off
-                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54) & pl.col("maps_to_pseudo").is_null(),
-                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54),
-                    (pl.col("oks") > 3) & (pl.col("hp") < 35) & pl.col("tm").is_between(50, 54),
-                    (pl.col("oks") > 2) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
-                    (pl.col("oks") > 1) & (pl.col("hp") < 40) & pl.col("tm").is_between(49, 56),
+                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("match_max_all").lt(21) & pl.col("length").lt(42) & (pl.col("maps_to_pseudo").is_null() | pl.col("maps_to_pseudo").eq("")),
+                    (pl.col("oks") > 4) & (pl.col("hp") < 35) & pl.col("match_max_all").lt(21) & pl.col("length").lt(42),
+                    (pl.col("oks") > 3) & (pl.col("hp") < 35) & pl.col("match_max_all").lt(24),
+                    (pl.col("oks") > 3) & pl.col("match_max_all").lt(28),
+                    (pl.col("oks") > 2) & pl.col("match_max_all").lt(28),
+                    (pl.col("oks") > 3),
+                    (pl.col("oks") > 1),
                     # fmt: on
                 ],
                 overlap=overlap,
-            )
+            ).sort("priority")
         )
     return pl.concat(out)

@@ -5,6 +5,7 @@ import polars as pl
 from Levenshtein import distance
 
 from oligocheck.merfish.alignment import gen_bowtie_index, gen_fasta, gen_fastq, run_bowtie
+from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.filtration import count_match
 from oligocheck.seqcalc import tm_fish
 from oligocheck.sequtils import parse_sam
@@ -12,7 +13,12 @@ from oligocheck.sequtils import parse_sam
 seed = "TTACACTCCATCCACTCAA"
 df = pl.read_csv("data/readout_ref.csv", separator="\t")
 # df = pl.read_csv("newreadouts.csv").with_columns(bit=pl.col("id"), name=pl.col("id").cast(pl.Utf8))
-
+gtf_all = ExternalData(
+    cache="data/mm39/gencode_vM32_transcripts_all.parquet",
+    path="data/mm39/Mus_musculus.GRCm39.109.gtf",
+    fasta="data/mm39/combi.fa.gz",
+)
+fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
 # %%
 ok = [seed]
 names = ["polyT"]
@@ -61,7 +67,7 @@ for i in range(len(picked)):
     fusedreadout.append(
         dict(
             name=f"{picked[i, 'name']}_{picked[i, 'name']}",
-            seq="TT" + picked[i, "seq"] + "TT" + picked[i, "seq"] + "TT",
+            seq="AA" + picked[i, "seq"] + "AA" + picked[i, "seq"] + "AA",
         )
     )
 
@@ -70,10 +76,10 @@ y = count_match(
     parse_sam(
         run_bowtie(
             gen_fastq(fused["name"], fused["seq"]).getvalue(),
-            "data/humouse/humouse",
-            seed_length=15,
+            "data/mm39/mm39",
+            seed_length=11,
             n_return=50,
-            threshold=18,
+            threshold=14,
         ),
         split_name=False,
     )
@@ -82,10 +88,16 @@ y = count_match(
     split2=pl.col("transcript").str.split("_").arr.get(1),
 )
 # %%
+
+y.sort("match_max").filter(pl.col("match_max") > 16).filter(pl.col("flag") & 16 == 0).with_columns(
+    transcript_name=pl.col("transcript").apply(gtf_all.ts_to_tsname)
+)
+# %%
 y.groupby("name").agg(pl.col("match_max").max()).filter(pl.col("match_max") > 18).with_columns(
     split1=pl.col("name").str.split("_").arr.get(0),
     split2=pl.col("name").str.split("_").arr.get(1),
 ).write_csv("data/readout_fused_bad.csv")
+
 
 # %%
 # %%

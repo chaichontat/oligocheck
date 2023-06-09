@@ -6,22 +6,11 @@ from pathlib import Path
 
 import polars as pl
 
+from oligocheck.geneframe import GeneFrame
 from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_structure
 from oligocheck.seqcalc import tm_fish, tm_hybrid, tm_match
-from oligocheck.sequtils import reverse_complement, stripplot
-
-
-class GeneFrame(pl.DataFrame):
-    def __init__(self, df: pl.DataFrame):
-        self._df = df._df
-
-    def gene(self, gene: str):
-        return self.filter(pl.col("gene") == gene)
-
-    def count(self):
-        return self.groupby("gene").agg(pl.count()).sort("count")
-
+from oligocheck.sequtils import reverse_complement, stripplot, gc_content
 
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
@@ -33,19 +22,84 @@ pl.Config.set_tbl_rows(100)
 
 genes = Path("panels/motorcortex_converted.txt").read_text().splitlines()
 
-dfs, sams, filtereds, offtargets, overlapped = {}, {}, {}, {}, {}
+dfx, sams, filtereds, offtargets, overlapped = {}, {}, {}, {}, {}
 for gene in genes:
-    dfs[gene] = pl.read_parquet(f"output/{gene}_final.parquet")
+    dfx[gene] = pl.read_parquet(f"output/{gene}_final.parquet")
     sams[gene] = pl.read_parquet(f"output/{gene}_all.parquet")
     filtereds[gene] = pl.read_parquet(f"output/{gene}_filtered.parquet")
     offtargets[gene] = pl.read_parquet(f"output/{gene}_offtargets.parquet")
-    try:
-        overlapped[gene] = pl.read_parquet(f"output/{gene}_final_overlapped.parquet")
-    except FileNotFoundError:
-        pass
-dfs = dfs | overlapped
+    # try:
+    #     overlapped[gene] = pl.read_parquet(f"output/{gene}_final_overlapped.parquet")
+    # except FileNotFoundError:
+    #     pass
+dfx = dfx | overlapped
+# %%
+dfs = GeneFrame.concat(dfx.values()).sort(
+    ["gene", pl.col("isoforms").arr.lengths(), "priority", "pos_end"],
+    descending=[False, True, False, True],
+)
 
-dfs = GeneFrame(pl.concat(dfs.values()))
+# cutted = (
+#     GeneFrame(pl.concat(dfs.values()).sort(["gene", "priority"]))
+#     .groupby("gene")
+#     .agg(pl.all().head(48))
+#     .explode(pl.all().exclude("gene"))
+# )
+
+# %%
+counts = dfs.count()
+# length = {k: len(v) for k, v in counts.iter_rows()}
+# filter length less than 30
+short = {k: v for k, v in counts.iter_rows() if v < 45}
+print(len(counts), len(short))
+# %%
+target = "Calb2"
+stripplot(
+    all=sams[target]["pos_end"],
+    filtered=filtereds[target]["pos_end"],
+    selected=dfs.gene(target)["pos_end"],
+)
+
+
+# %%
+# %%
+
+
+# %%
+def runpls(gene: str):
+    subprocess.run(
+        ["python", "scripts/new_postprocess.py", gene, "-O", "5"],
+        check=True,
+        capture_output=True,
+    )
+
+
+with ThreadPoolExecutor(32) as executor:
+    for x in as_completed([executor.submit(runpls, gene) for gene in short.keys()]):
+        print("ok")
+        x.result()
+
+
+# %%
+fixed_n = {}
+short_fixed = {}
+for gene in short.keys():
+    for ol in [5, 10, 15, 20]:
+        df = pl.read_parquet(f"output/{gene}_final_overlap_{ol}.parquet")
+        fixed_n[gene] = ol
+        if len(df) >= 48:
+            short_fixed[gene] = df
+            break
+        if ol == 20:
+            short_fixed[gene] = df
+
+    # shortfix.groupby("gene").agg(pl.count())
+# short_fixed = pl.concat(short_fixed.values())
+
+# dfs = pl.concat([cutted.filter(~pl.col("gene").is_in(short.keys()))[short_fixed.columns], short_fixed])
+# %%
+stripplot(all=sam["pos_end"], filtered=filtered["pos_end"], s=df["pos_end"])
+
 # %%
 
 sams["Abi3"].filter(
@@ -70,34 +124,6 @@ for x in (
 ):
     print(x["id"])
     print(tm_match(x["seq"], x["cigar"], x["mismatched_reference"]))
-# %%
-counts = dfs.groupby("gene").agg(pl.count())
-# length = {k: len(v) for k, v in counts.iter_rows()}
-# filter length less than 30
-short = {k: v for k, v in counts.iter_rows() if v < 40}
-print(len(counts), len(short))
-# %%
-stripplot(all=sam["pos_end"], filtered=filtered["pos_end"], s=df["pos_end"])
-
-
-# %%
-def runpls(gene: str):
-    subprocess.run(
-        ["python", "scripts/new_postprocess.py", gene, "-O", "10"],
-        check=True,
-        capture_output=True,
-    )
-
-
-with ThreadPoolExecutor(32) as executor:
-    for x in as_completed([executor.submit(runpls, gene) for gene in short.keys()]):
-        print("ok")
-        x.result()
-
-
-# %%
-
-# %%
 
 model = gen_model(47)
 g = secondary_structure(

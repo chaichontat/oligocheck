@@ -28,18 +28,20 @@ res.filter(pl.col("name") == "Abi3_88").with_columns(
     transcript=pl.col("transcript").str.extract(r"(ENSMUST\d+)")
 ).join(fpkm, left_on="transcript", right_on="transcript_id(s)", how="left")
 # %%
-from Levenshtein import distance
 import polars as pl
+from Levenshtein import distance
 
-ro = pl.read_csv("data/readout_ref.csv")
+ro = pl.read_csv("data/readout_ref.csv", separator="\t")
+mo= pl.read_csv("data/readout_motorcortex.csv", separator="\t")
 
+ro.join(mo, on="name", how="outer")
+#%%
 m = 1000
 for i in range(len(ro)):
     for j in range(i + 1, len(ro)):
         m = min(distance(ro[i, "Sequence"], ro[j, "Sequence"]), m)
 print(m)
 
-def gen
 # %%
 
 d = (
@@ -67,4 +69,5 @@ t = res.filter(pl.col("name").str.starts_with("Abi3") & pl.col("aln_score").eq(6
 # %%
 res.filter(pl.col("name") == "Abi3_88").with_columns(
     transcript=pl.col("transcript").str.extract(r"(ENSMUST\d+)")
+).join(fpkm, left_on="transcript", right_on="transcript_id(s)", how="left")
 ).join(fpkm, left_on="transcript", right_on="transcript_id(s)", how="left")

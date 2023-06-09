@@ -8,7 +8,7 @@ from oligocheck.sequtils import gc_content
 
 
 def crawler(seq: str, prefix: str) -> pl.DataFrame:
-    minmax = [25, 41]
+    minmax = [25, 46]
     gc_limit = [0.3, 0.7]
     j = minmax[0]
     hp_limit = 40 + 0.65 * 30
