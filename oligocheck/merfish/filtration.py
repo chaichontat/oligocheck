@@ -2,7 +2,6 @@ import numpy as np
 import polars as pl
 
 from oligocheck.algorithms import find_overlap, find_overlap_weighted
-from oligocheck.merfish.external_data import ExternalData
 
 
 def handle_overlap(
@@ -14,6 +13,7 @@ def handle_overlap(
     if len(gene := df.select(pl.col("gene").unique())) > 1:
         raise ValueError("More than one gene in filtered")
     gene = gene.item()
+
     df = df.sort(by=["is_ori_seq", "transcript_ori", "pos_end", "tm"], descending=[True, False, False, True])
 
     if not criteria:
@@ -94,3 +94,10 @@ def the_filter(df: pl.DataFrame, overlap: int = -1) -> pl.DataFrame:
             ).sort("priority")
         )
     return pl.concat(out)
+
+
+def check_kmers(seq: str, kmer: set[str], n: int) -> bool:
+    for i in range(len(seq) - n + 1):
+        if seq[i : i + n] in kmer:
+            return True
+    return False

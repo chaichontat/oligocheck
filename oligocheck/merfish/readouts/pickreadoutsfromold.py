@@ -6,9 +6,7 @@ from Levenshtein import distance
 
 from oligocheck.merfish.alignment import gen_bowtie_index, gen_fasta, gen_fastq, run_bowtie
 from oligocheck.merfish.external_data import ExternalData
-from oligocheck.merfish.filtration import count_match
 from oligocheck.seqcalc import tm_fish
-from oligocheck.sequtils import parse_sam
 
 seed = "TTACACTCCATCCACTCAA"
 df = pl.read_csv("data/readout_ref.csv", separator="\t")
@@ -54,9 +52,9 @@ nottoobad = (
 )
 picked2 = (
     picked.filter(pl.col("name").is_in(nottoobad["name"]))
-    .with_columns(pl.col("seq").apply(tm_fish).alias("tm"))
-    .sort("tm")
+    .with_columns(pl.col("seq").apply(lambda x: tm_fish(x, formamide=0)).alias("tm"))
     .filter(pl.col("tm").is_between(51, 55))
+    .sort("name")
 )
 picked2.sort("name").with_row_count("id", 1).write_csv("data/readout_ref_filtered.csv")
 # %%
@@ -84,8 +82,8 @@ y = count_match(
         split_name=False,
     )
 ).with_columns(
-    split1=pl.col("transcript").str.split("_").arr.get(0),
-    split2=pl.col("transcript").str.split("_").arr.get(1),
+    split1=pl.col("transcript").str.split("_").list.get(0),
+    split2=pl.col("transcript").str.split("_").list.get(1),
 )
 # %%
 
@@ -94,8 +92,8 @@ y.sort("match_max").filter(pl.col("match_max") > 16).filter(pl.col("flag") & 16 
 )
 # %%
 y.groupby("name").agg(pl.col("match_max").max()).filter(pl.col("match_max") > 18).with_columns(
-    split1=pl.col("name").str.split("_").arr.get(0),
-    split2=pl.col("name").str.split("_").arr.get(1),
+    split1=pl.col("name").str.split("_").list.get(0),
+    split2=pl.col("name").str.split("_").list.get(1),
 ).write_csv("data/readout_fused_bad.csv")
 
 

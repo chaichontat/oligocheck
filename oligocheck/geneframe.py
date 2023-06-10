@@ -1,25 +1,75 @@
-from functools import reduce
+from __future__ import annotations
+
+from functools import reduce, wraps
 from io import StringIO
-from typing import Collection, Iterable, TypeVar
+from typing import Any, Callable, Collection, Iterable, Literal, ParamSpec, TypeVar, overload
 
 import polars as pl
 
+from oligocheck.boilerplate import copy_signature
 from oligocheck.seqcalc import tm_match
 
-T = TypeVar("T", bound=pl.DataFrame)
+T = TypeVar("T")
+P, R = ParamSpec("P"), TypeVar("R")
+
+
+def to_geneframe(f: Callable[P, pl.DataFrame]) -> Callable[P, GeneFrame]:
+    @wraps(f)
+    def wrap(*args: P.args, **kwargs: P.kwargs) -> GeneFrame:
+        return GeneFrame(f(*args, **kwargs))
+
+    return wrap
+
+
+# Our test function for kwargs
+def source_func(foo: str, bar: int, default: bool = True) -> str:
+    if not default:
+        return "Not Default!"
+    return f"{foo}_{bar}"
+
+
+class LazyGeneFrame(pl.LazyFrame):
+    def __init__(self, ldf: pl.LazyFrame):
+        self._ldf = ldf._ldf
+
+    @to_geneframe
+    @copy_signature(pl.LazyFrame.collect)
+    def collect(self, *args: Any, **kwargs: Any):
+        return super().collect(*args, **kwargs)
 
 
 class GeneFrame(pl.DataFrame):
     # NECESSARY_COLUMNS = {"seq", "transcript", "pos_start", "pos_end"}
-
     def __init__(self, df: pl.DataFrame):
         self._df = df._df
 
-    def gene(self, gene: str):
-        return self.filter(pl.col("gene") == gene)
+    def lazy(self) -> LazyGeneFrame:
+        return LazyGeneFrame(super().lazy())
 
+    @to_geneframe
     def count(self, col: str = "gene", descending: bool = False):
         return self.groupby(col).agg(pl.count()).sort("count", descending=descending)
+
+    @to_geneframe
+    @copy_signature(pl.DataFrame.join)
+    def join(self, *args: Any, **kwargs: Any):
+        return super().join(*args, **kwargs)
+
+    @to_geneframe
+    @copy_signature(pl.DataFrame.sort)
+    def sort(self, *args: Any, **kwargs: Any):
+        return super().sort(*args, **kwargs)
+
+    def sort_(self, **kwargs: bool):
+        return self.sort(by=list(kwargs.keys()), descending=list(kwargs.values()))
+
+    @to_geneframe
+    @copy_signature(pl.DataFrame.filter)
+    def filter(self, *args: Any, **kwargs: Any):
+        return super().filter(*args, **kwargs)
+
+    def gene(self, gene: str):
+        return self.filter(pl.col("gene") == gene)
 
     def filter_eq(self, **kwargs: str | float):
         return self.filter(reduce(lambda x, y: x & y, [pl.col(k) == v for k, v in kwargs.items()]))
@@ -37,7 +87,7 @@ class GeneFrame(pl.DataFrame):
         return self.join(other, on=on, left_on=left_on, right_on=right_on, how="left")
 
     @classmethod
-    def concat(cls, dfs: Iterable[pl.DataFrame]):
+    def concat(cls, dfs: Iterable[pl.DataFrame]) -> GeneFrame:
         return cls(pl.concat(dfs))
 
     @classmethod
@@ -45,7 +95,7 @@ class GeneFrame(pl.DataFrame):
         return cls(pl.read_parquet(path))
 
     @staticmethod
-    def _count_match(df: T) -> T:
+    def _count_match(df: pl.DataFrame):
         return df.join(
             df[["id", "mismatched_reference"]]
             .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
@@ -61,13 +111,13 @@ class GeneFrame(pl.DataFrame):
         )
 
     @classmethod
-    def from_sam(cls, sam: str, split_name: bool = True, count_match: bool = True):
+    def from_sam(cls, sam: str, split_name: bool = True, count_match: bool = True) -> GeneFrame:
         # s = (
         #     pl.DataFrame(dict(strs=[sam]))
         #     .lazy()
         #     .with_columns(pl.col("strs").str.split("\n"))
         #     .explode("strs")
-        #     .with_columns(pl.col("strs").str.strip().str.split("\t").arr.slice(0, 10))
+        #     .with_columns(pl.col("strs").str.strip().str.split("\t").list.slice(0, 10))
         #     .with_row_count("id")
         #     .explode("strs")
         #     .with_columns(col_nm="string_" + pl.arange(0, pl.count()).cast(pl.Utf8).str.zfill(2).over("id"))
@@ -158,15 +208,38 @@ class GeneFrame(pl.DataFrame):
             )
             .collect()
         )
-        return cls._count_match(cls(df)) if count_match else cls(df)
+        return cls._count_match(df) if count_match else cls(df)
+
+    @overload
+    def filter_by_match(
+        self,
+        acceptable_tss: Collection[str],
+        match: float = ...,
+        match_max: float = ...,
+        *,
+        return_nogo: Literal[True],
+    ) -> tuple[GeneFrame, list[str]]:
+        ...
+
+    @overload
+    def filter_by_match(
+        self,
+        acceptable_tss: Collection[str],
+        match: float = ...,
+        match_max: float = ...,
+        *,
+        return_nogo: Literal[False] = ...,
+    ) -> GeneFrame:
+        ...
 
     def filter_by_match(
         self,
         acceptable_tss: Collection[str],
         match: float = 0.8,
         match_max: float = 0.7,
+        *,
         return_nogo: bool = False,
-    ):
+    ) -> tuple[GeneFrame, list[str]] | GeneFrame:
         nogo = self.filter(
             (pl.col("match").gt(pl.col("length") * match))
             & (pl.col("match_max").gt(pl.col("length") * match_max))
@@ -197,11 +270,12 @@ class GeneFrame(pl.DataFrame):
             )
         )
         return (
-            filtered
+            GeneFrame(filtered)
             if not return_nogo
-            else (filtered, nogo["name"].unique().to_list() + nogo_soft["name"].unique().to_list())
+            else (GeneFrame(filtered), nogo["name"].unique().to_list() + nogo_soft["name"].unique().to_list())
         )
 
 
-def concat(dfs: Iterable[pl.DataFrame]) -> GeneFrame:
-    return GeneFrame(pl.concat(dfs))
+if __name__ == "__main__":
+    g = GeneFrame(pl.DataFrame({"name": ["a", "b", "c"], "seq": ["A", "B", "C"]}))
+    g.filter("fsd")

@@ -1,21 +1,19 @@
 # %%
 import logging
-import re
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import cast
 
 import click
 import numpy as np
 import polars as pl
 
 from oligocheck.geneframe import GeneFrame
-from oligocheck.merfish.alignment import gen_fastq, gen_rrna_trna, run_bowtie
+from oligocheck.merfish.alignment import gen_fastq, run_bowtie
 from oligocheck.merfish.crawler import crawler
-from oligocheck.merfish.external_data import ExternalData, find_aliases, get_rrna
-from oligocheck.merfish.filtration import count_match, the_filter
-from oligocheck.seqcalc import hp_fish, tm_hybrid, tm_match
-from oligocheck.sequtils import reverse_complement, slide
+from oligocheck.merfish.external_data import ExternalData
+from oligocheck.merfish.filtration import check_kmers, the_filter
+from oligocheck.seqcalc import hp_fish, tm_hybrid
 
 sys.setrecursionlimit(5000)
 pl.Config.set_fmt_str_lengths(100)
@@ -75,6 +73,7 @@ def block_bowtie(gene: str, ts: str):
 
 
 def get_pseudogenes(gene: str, y: GeneFrame, limit: int = 5) -> tuple[pl.Series, pl.Series]:
+    print(type(y.count("transcript")))
     counts = (
         y.count("transcript")
         .left_join(fpkm, left_on="transcript", right_on="transcript_id(s)")
@@ -102,30 +101,22 @@ def get_pseudogenes(gene: str, y: GeneFrame, limit: int = 5) -> tuple[pl.Series,
 
 
 # %%
-def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp: bool = False):
+def run(
+    gene: str,
+    overlap: int = -2,
+    allow_pseudo: bool = True,
+    ignore_revcomp: bool = False,
+    realign: bool = False,
+):
     Path("output").mkdir(exist_ok=True)
-    # wants = list(filter(lambda x: x, Path("celltypegenes.csv").read_text().splitlines()))
-    # gene = wants[7]
-    # if Path(f"output/{gene}_final.parquet").exists():
-    #     return
     tss_gencode = set(gtf.filter_gene(gene)["transcript_id"])
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
     if not len(tss_gencode):
         raise ValueError(f"Gene {gene} not found in GENCODE.")
-    # max(tss_gencode, key=lambda x: len(gtf.get_seq(x)))
     canonical = gtf_all.filter_gene(gene).filter(pl.col("tag") == "Ensembl_canonical")[0, "transcript_id"]
     tss_gencode.add(canonical)  # Some canonical transcripts are not in GENCODE.
-    # print(
-    #     gtf_all.filter_gene(gene)[["transcript_id", "transcript_name"]]
-    #     .join(fpkm, left_on="transcript_id", right_on="transcript_id(s)", how="left")
-    #     .sort("FPKM", descending=True)
-    #     .with_columns(
-    #         is_gencode=pl.when(pl.col("transcript_id").is_in(tss_gencode)).then(True).otherwise(False)
-    #     )
-    #     .sort(["is_gencode", "transcript_name"], descending=True)
-    # )
 
-    if not Path(f"output/{gene}_all.parquet").exists():
+    if realign or not Path(f"output/{gene}_all.parquet").exists():
         y, crawled = block_bowtie(gene, canonical)
 
         offtargets = (
@@ -141,27 +132,6 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
         print(f"{gene} reading from cache.")
         y = GeneFrame.read_parquet(f"output/{gene}_all.parquet")
         offtargets = pl.read_parquet(f"output/{gene}_offtargets.parquet")
-
-    # unique = y.unique("name")
-    # tr = count_match(
-    #     parse_sam(
-    #         run_bowtie(
-    #             gen_fastq(unique["name"], unique["seq"]).getvalue(),
-    #             "data/mm39/trcombi",
-    #             seed_length=10,
-    #             threshold=14,
-    #         )
-    #     )
-    # )
-    # nogo = (
-    #     tr.filter(pl.col("transcript") != "")
-    #     .groupby("name")
-    #     .agg(pl.max("match_max"))
-    #     .filter(pl.col("match_max") > 14)
-    # )
-    # print(tr.filter(pl.col("name").is_in(nogo["name"])))
-    # print(f"{gene} has {len(nogo)} candidates removed from rRNA/tRNA homology.")
-    # y = y.filter(~pl.col("name").is_in(nogo["name"]))
 
     if ignore_revcomp:
         print("Ignoring revcomped reads.", len(y), end=" ")
@@ -220,8 +190,8 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
             ]
         )
         .with_columns(oks=pl.sum(pl.col("^ok_.*$")))
-        .filter(~pl.col("seq").apply(lambda x: bool(set(slide(x, 18)) & kmerset)))
-        .filter(~pl.col("seq").apply(lambda x: bool(set(slide(x, 15)) & trna_rna_kmers)))
+        .filter(~pl.col("seq").apply(lambda x: check_kmers(cast(str, x), kmerset, 18)))
+        .filter(~pl.col("seq").apply(lambda x: check_kmers(cast(str, x), trna_rna_kmers, 15)))
         .collect()
         .join(names_with_pseudo, on="name", how="left")
         .join(isoforms, on="name", how="left")
@@ -241,13 +211,21 @@ def run(gene: str, overlap: int = -2, allow_pseudo: bool = True, ignore_revcomp:
 @click.option("--debug", "-d", is_flag=True)
 @click.option("--ignore-revcomp", "-r", is_flag=True)
 @click.option("--overlap", "-O", type=int, default=-2)
-def main(gene: str, ignore_revcomp: bool, overlap: int = -2, allow_pseudo: bool = True, debug: bool = False):
+@click.option("--realign", is_flag=True)
+def main(
+    gene: str,
+    ignore_revcomp: bool,
+    overlap: int = -2,
+    allow_pseudo: bool = True,
+    debug: bool = False,
+    realign: bool = False,
+):
     if debug:
         logging.basicConfig(level=logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        run(gene, overlap=overlap, allow_pseudo=allow_pseudo, ignore_revcomp=ignore_revcomp)
+        run(gene, overlap=overlap, allow_pseudo=allow_pseudo, ignore_revcomp=ignore_revcomp, realign=realign)
     except Exception as e:
         raise Exception(f"Failed to run {gene}") from e
 

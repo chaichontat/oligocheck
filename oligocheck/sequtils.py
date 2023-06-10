@@ -75,7 +75,8 @@ def gc_content(seq: str) -> float:
 
 
 def slide(x: str, n: int = 20):
-    return [x[i : i + n] for i in range(len(x) - n + 1)]
+    for i in range(len(x) - n + 1):
+        yield x[i : i + n]
 
 
 def equal_distance(total: int, choose: int) -> npt.NDArray[np.int_]:

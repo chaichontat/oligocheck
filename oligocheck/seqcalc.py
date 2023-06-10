@@ -50,8 +50,8 @@ R_DNA = dict(zip(deltas["key"], deltas[["H", "S"]].iter_rows())) | {
 }
 
 CONDITIONS = {
-    "fish": dict(nn_table=mt.DNA_NN3, Na=330, Tris=0, Mg=0, dNTPs=0, dnac1=1, dnac2=0),
-    "hybrid": dict(nn_table=R_DNA, Na=330, Tris=0, Mg=0, dNTPs=0, dnac1=1, dnac2=0),
+    "fish": dict(nn_table=mt.DNA_NN3, Na=390, Tris=0, Mg=0, dNTPs=0, dnac1=1, dnac2=0),
+    "hybrid": dict(nn_table=R_DNA, Na=390, Tris=0, Mg=0, dNTPs=0, dnac1=1, dnac2=0),
     "q5": dict(nn_table=mt.DNA_NN3, Na=100, Tris=0, Mg=2, dNTPs=0.2, dnac1=500, dnac2=10),
 }
 

@@ -26,13 +26,21 @@ gtf = ExternalData(
 
 
 # @task(tags=["parallel"], name="First pass", task_run_name="first-pass-{gene}")
-def runpls(gene: str):
+def runpls(gene: str, skipdone: bool = False) -> str:
     # if not Path(f"output/{gene}_high.parquet").exists():
+    if skipdone and Path(f"output/{gene}_final.parquet").exists():
+        print(f"{gene} already done, skipping.")
+        return ""
+
     log("running", gene)
-    subprocess.run(
-        ["python", "scripts/new_postprocess.py", gene], check=True, capture_output=True, cwd=os.getcwd()
+    res = subprocess.run(
+        ["python", "scripts/new_postprocess.py", gene],
+        check=True,
+        capture_output=True,
+        cwd=os.getcwd(),
     )
     log(f"ran {gene}")
+    return res.stdout.decode()
 
 
 # %%
@@ -60,7 +68,8 @@ def check_gene_names(genes: list[str]):
 
 @click.command()
 @click.argument("genes_path", type=click.Path(exists=True))
-def main(genes_path: str | Path):
+@click.option("--skipdone", is_flag=True)
+def main(genes_path: str | Path, skipdone: bool = False):
     # asyncio.run(set_limit())
     genes_path = Path(genes_path)
     genes: list[str] = list(filter(lambda x: x, Path(genes_path).read_text().splitlines()))
@@ -74,9 +83,12 @@ def main(genes_path: str | Path):
     # run(genes)
 
     with ThreadPoolExecutor(32) as executor:
-        for x in as_completed([executor.submit(runpls, gene) for gene in sr]):
+        for x in as_completed([executor.submit(lambda g: runpls(g, skipdone), gene) for gene in sr]):
             print("ok")
-            x.result()
+            try:
+                x.result()
+            except subprocess.CalledProcessError:
+                print(x.result())
 
 
 if __name__ == "__main__":

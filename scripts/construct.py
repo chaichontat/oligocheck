@@ -1,18 +1,19 @@
 # %%
 import json
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import cycle, permutations
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-import numpy as np
 import polars as pl
 
-from oligocheck.geneframe import GeneFrame, concat
+from oligocheck.geneframe import GeneFrame
 from oligocheck.merfish.alignment import gen_fasta, gen_fastq, run_bowtie
 from oligocheck.merfish.external_data import ExternalData
 from oligocheck.merfish.pairwise import pairwise_alignment
-from oligocheck.seqcalc import tm_hybrid, tm_match
-from oligocheck.sequtils import reverse_complement, slide, stripplot
+from oligocheck.seqcalc import tm_hybrid
+from oligocheck.sequtils import reverse_complement, slide
 
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
@@ -45,13 +46,13 @@ mapping = dict(orir[["Sequence", "Readout probe name"]].iter_rows())
 codebook = (
     ori.filter(~pl.col("Gene name").is_in(sm))
     .with_columns(
-        ro1=pl.col("Sequence").str.split(" ").arr.get(2),
-        ro2=pl.col("Sequence").str.split(" ").arr.get(5),
+        ro1=pl.col("Sequence").str.split(" ").list.get(2),
+        ro2=pl.col("Sequence").str.split(" ").list.get(5),
     )
     .select(["Gene name", "ro1", "ro2"])
     .groupby("Gene name")
     .all()
-    .select("Gene name", combi=pl.col("ro1").arr.concat(pl.col("ro2")).arr.unique())
+    .select("Gene name", combi=pl.col("ro1").list.concat(pl.col("ro2")).list.unique())
     .explode("combi")
     .with_columns(
         pl.col("Gene name").apply(lambda x: convert.get(x, x)).alias("Gene name"),
@@ -66,7 +67,6 @@ bitnmap = dict(
     .iter_rows()
 )
 
-# %%
 readouts = pl.read_csv("data/readout_ref_filtered.csv")
 codebook = dict(
     codebook.with_columns(combi=pl.col("combi").apply(bitnmap.get)).groupby("Gene name").all().iter_rows()
@@ -76,38 +76,63 @@ codebook = dict(
 # blacklist = set(pl.read_csv("data/readout_fused_bad.csv")[["split1", "split2"]].iter_rows())
 genes = Path("panels/motorcortex_converted.txt").read_text().splitlines()
 acceptable_tss = {g: set(pl.read_csv(f"output/{g}_acceptable_tss.csv")["transcript"]) for g in genes}
-n = 48
+n, short_threshold = 70, 65
 # %%
 dfx, overlapped = {}, {}
 for gene in genes:
     dfx[gene] = GeneFrame.read_parquet(f"output/{gene}_final.parquet")
-dfs = concat(dfx.values())
-short = dfs.count("gene").filter(pl.col("count") < 45)
+dfs = GeneFrame.concat(dfx.values())
+short = dfs.count("gene").filter(pl.col("count") < short_threshold)
 
 
 # %%
 fixed_n = {}
 short_fixed = {}
-for gene in short["gene"]:
-    for ol in [5, 10, 15, 20]:
-        df = GeneFrame.read_parquet(f"output/{gene}_final_overlap_{ol}.parquet")
-        fixed_n[gene] = ol
-        if len(df) >= n:
-            short_fixed[gene] = df
-            break
-        if ol == 20:
-            short_fixed[gene] = df
-            break
-    else:
-        raise ValueError(f"Gene {gene} cannot be fixed")
-short_fixed = concat(short_fixed.values())
 
-cutted = (
-    dfs.sort(["gene", "priority"]).groupby("gene").agg(pl.all().head(48)).explode(pl.all().exclude("gene"))
-)
-dfs = concat([cutted.filter(~pl.col("gene").is_in(short["gene"])), short_fixed[cutted.columns]])
+
+def run_overlap(genes: Iterable[str], overlap: int):
+    def runpls(gene: str):
+        subprocess.run(
+            ["python", "scripts/new_postprocess.py", gene, "-O", str(overlap)],
+            check=True,
+            capture_output=True,
+        )
+
+    with ThreadPoolExecutor(32) as executor:
+        for x in as_completed(
+            [
+                executor.submit(runpls, gene)
+                for gene in genes
+                if not Path(f"output/{gene}_final_overlap_{overlap}.parquet").exists()
+            ]
+        ):
+            print("ok")
+            x.result()
+
+
+needs_fixing = set(short["gene"])
+
+for ol in [5, 10, 15, 20]:
+    print(ol, needs_fixing)
+    run_overlap(needs_fixing, ol)
+    for gene in needs_fixing.copy():
+        df = GeneFrame.read_parquet(f"output/{gene}_final_overlap_{ol}.parquet")
+        if len(df) >= short_threshold or ol == 20:
+            needs_fixing.remove(gene)
+            fixed_n[gene] = ol
+            short_fixed[gene] = df
+# else:
+#     raise ValueError(f"Gene {gene} cannot be fixed")
+
+short_fixed = GeneFrame.concat(short_fixed.values())
 # %%
-counts = dfs.count("gene")
+cutted = GeneFrame.concat([dfs.filter(~pl.col("gene").is_in(short["gene"])), short_fixed[dfs.columns]])
+cutted = GeneFrame(
+    cutted.sort(["gene", "priority"]).groupby("gene").agg(pl.all().head(n)).explode(pl.all().exclude("gene"))
+)
+# %%
+counts = cutted.count("gene")
+counts, len(cutted)
 
 
 # %%
@@ -165,7 +190,7 @@ footers = {"celltype": "TATTTCCCTATAGTGAGTCGTATTAGACCGGTCT"}
 
 # %%
 constructed = (
-    dfs.groupby("gene")
+    cutted.groupby("gene")
     .apply(lambda df: df.join(construct_encoding(df), on="name", how="inner"))
     .with_columns(constructed=headers["celltype"] + pl.col("constructed") + "TATTTCCC")
 )
@@ -222,6 +247,7 @@ def check_offtargets(constructed: pl.DataFrame, acceptable_tss: dict[str, list[s
 
 nogo = check_offtargets(constructed, acceptable_tss)
 pass1 = constructed.filter(~pl.col("name").is_in(nogo))
+len(nogo)
 # %%
 
 pass2 = []
@@ -234,7 +260,7 @@ for _, df in dfs.filter(pl.col("name").is_in(nogo)).groupby("gene"):
     )
 pass2 = pl.concat(pass2).with_columns(
     name_var=pl.col("name"),
-    name=pl.col("name").str.split("__").arr.get(0),
+    name=pl.col("name").str.split("__").list.get(0),
 )
 # %%
 nogo2 = check_offtargets(pass2, acceptable_tss)
@@ -242,7 +268,7 @@ nogo2 = check_offtargets(pass2, acceptable_tss)
 constructed = pl.concat(
     [
         pass1,
-        dfs.join(
+        cutted.join(
             pass2.filter(~pl.col("name_var").is_in(nogo2)).unique("name").drop("name_var"),
             on="name",
             how="inner",
@@ -280,7 +306,7 @@ p = pairwise_alignment(y[5, "seq"], y[5, "cigar"], y[5, "mismatched_reference"])
 theirs = (
     ori.filter(~pl.col("Gene name").is_in(sm))
     .with_row_count("id")
-    .with_columns(seq=pl.col("Sequence").str.split(" ").arr.get(3))
+    .with_columns(seq=pl.col("Sequence").str.split(" ").list.get(3))
     .with_columns(name=pl.col("Gene name") + "_" + pl.col("id").cast(pl.Utf8))
 )
 
@@ -293,7 +319,7 @@ res = GeneFrame.from_sam(
         fasta=True,
     ),
     split_name=False,
-).with_columns(gene=pl.col("name").str.split("_").arr.get(0))
+).with_columns(gene=pl.col("name").str.split("_").list.get(0))
 # %%
 ontarget = res.filter_eq(aln_score=60).unique("name").with_columns(tm=pl.col("seq").apply(tm_hybrid))
 offtarget = (
