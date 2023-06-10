@@ -68,8 +68,8 @@ def formamide_correction(seq: str, fmd: float = 30) -> float:
     return (0.453 * (gc_content(seq) / 100.0) - 2.88) * formamide_molar(fmd)
 
 
-def tm_fish(seq: str, **kwargs: float) -> float:
-    return mt.Tm_NN(Seq(seq), **{**CONDITIONS["fish"], **kwargs}) + formamide_correction(seq)
+def tm_fish(seq: str, formamide: float = 30, **kwargs: float) -> float:
+    return mt.Tm_NN(Seq(seq), **{**CONDITIONS["fish"], **kwargs}) + formamide_correction(seq, fmd=formamide)
 
 
 def tm_hybrid(seq: str, **kwargs: float) -> float:

@@ -5,22 +5,6 @@ from oligocheck.algorithms import find_overlap, find_overlap_weighted
 from oligocheck.merfish.external_data import ExternalData
 
 
-def count_match(df: pl.DataFrame) -> pl.DataFrame:
-    return df.join(
-        df[["id", "mismatched_reference"]]
-        .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
-        .explode("mismatched_reference")
-        .with_columns(pl.col("mismatched_reference").cast(pl.UInt8))
-        .groupby("id")
-        .agg(
-            match=pl.col("mismatched_reference").sum(),
-            match_max=pl.col("mismatched_reference").max(),
-        ),
-        on="id",
-        how="left",
-    )
-
-
 def handle_overlap(
     df: pl.DataFrame,
     criteria: list[pl.Expr],
@@ -103,7 +87,7 @@ def the_filter(df: pl.DataFrame, overlap: int = -1) -> pl.DataFrame:
                     (pl.col("oks") > 3) & pl.col("match_max_all").lt(28),
                     (pl.col("oks") > 2) & pl.col("match_max_all").lt(28),
                     (pl.col("oks") > 3),
-                    (pl.col("oks") > 1),
+                    # (pl.col("oks") > 1),
                     # fmt: on
                 ],
                 overlap=overlap,

@@ -1,18 +1,12 @@
 # %%
 import random
 import re
-from io import StringIO
 from typing import Any
 
 import colorama
 import numpy as np
 import numpy.typing as npt
-import polars as pl
-from Bio.Seq import Seq
-from Bio.SeqUtils import MeltingTemp as mt
 from matplotlib.axes import Axes
-
-from oligocheck.merfish.pairwise import pairwise_alignment
 
 table = str.maketrans("ACGTacgt ", "TGCAtgca ")
 name_splitter = re.compile(r"(.+)_(.+):(\d+)-(\d+)")
@@ -103,94 +97,6 @@ def plot_gc_content(ax: Axes, seq: str, window_size: int = 50, **kwargs: Any):
     ax.fill_between(np.arange(len(seq) - window_size + 1), out, **(dict(alpha=0.3) | kwargs))  # type: ignore
     ax.set_ylim(bottom=0, top=1)
     ax.set_ylabel("GC (%)")
-
-
-def parse_sam(sam: str, split_name: bool = True) -> pl.DataFrame:
-    # file_read = [",".join(line.strip().split("\t")[:10]) for line in sam.split("\n")]
-
-    # s = (
-    #     pl.DataFrame(dict(strs=[sam]))
-    #     .lazy()
-    #     .with_columns(pl.col("strs").str.split("\n"))
-    #     .explode("strs")
-    #     .with_columns(pl.col("strs").str.strip().str.split("\t").arr.slice(0, 10))
-    #     .with_row_count("id")
-    #     .explode("strs")
-    #     .with_columns(col_nm="string_" + pl.arange(0, pl.count()).cast(pl.Utf8).str.zfill(2).over("id"))
-    #     .sort(["col_nm", "id"])
-    #     .collect()
-    # )
-
-    # faster than pivot
-    key_optional = {
-        "AS": "aln_score",
-        "XS": "aln_score_best",
-        "XN": "n_ambiguous",
-        "XM": "n_mismatches",
-        "XO": "n_opens",
-        "XG": "n_extensions",
-        "NM": "edit_distance",
-        "MD": "mismatched_reference",
-        "YT": "pair_state",
-    }
-
-    df = (
-        pl.read_csv(StringIO(sam), separator="\n", has_header=False)
-        .lazy()
-        .with_row_count("id")
-        .with_columns(temp=pl.col("column_1").str.split_exact("\t", 9))
-        .unnest("temp")
-        .rename(
-            {
-                f"field_{i}": x
-                for i, x in enumerate(
-                    ["name", "flag", "transcript", "pos", "mapq", "cigar", "rnext", "pnext", "tlen", "seq"]
-                )
-            }
-        )
-        .with_columns(
-            flag=pl.col("flag").cast(pl.UInt16),
-            pos=pl.col("pos").cast(pl.UInt32),
-            mapq=pl.col("mapq").cast(pl.UInt8),
-            aln_score=pl.col("column_1").str.extract(r"AS:i:(\d+)").cast(pl.UInt16),
-            aln_score_best=pl.col("column_1").str.extract(r"XS:i:(\d+)").cast(pl.UInt16),
-            n_ambiguous=pl.col("column_1").str.extract(r"XN:i:(\d+)").cast(pl.UInt16),
-            n_mismatches=pl.col("column_1").str.extract(r"XM:i:(\d+)").cast(pl.UInt16),
-            n_opens=pl.col("column_1").str.extract(r"XO:i:(\d+)").cast(pl.UInt16),
-            n_extensions=pl.col("column_1").str.extract(r"XG:i:(\d+)").cast(pl.UInt16),
-            edit_distance=pl.col("column_1").str.extract(r"NM:i:(\d+)").cast(pl.UInt16),
-            mismatched_reference=pl.col("column_1").str.extract(r"MD:Z:(\S+)"),
-        )
-        .drop(["column_1", "mapq", "rnext", "pnext", "tlen"])
-        .with_columns(
-            [
-                pl.when(pl.col("transcript").str.contains(r"(.*)\.\d+"))
-                .then(pl.col("transcript").str.extract(r"(.*)\.\d+"))
-                .otherwise(pl.col("transcript"))
-                .alias("transcript")
-            ]
-            + [
-                pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 1).alias("gene"),
-                pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 2).alias("transcript_ori"),
-                pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 3).cast(pl.UInt32).alias("pos_start"),
-                pl.col("name").str.extract(r"(.+)_(.+):(\d+)-(\d+)", 4).cast(pl.UInt32).alias("pos_end"),
-            ]
-            if split_name
-            else []
-        )
-        .with_columns(
-            [
-                (pl.col("transcript") == pl.col("transcript_ori")).alias("is_ori_seq"),
-            ]
-            + [
-                (pl.col("pos_end") - pl.col("pos_start") + 1).alias("length"),
-            ]
-            if split_name
-            else []
-        )
-        .collect()
-    )
-    return df
 
 
 # %%
