@@ -1,4 +1,10 @@
+import json
 from typing import Any, Callable, Literal, ParamSpec, Type, TypeVar, cast
+
+from rich.console import Console
+from rich.syntax import Syntax
+
+console = Console()
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -12,3 +18,7 @@ def copy_signature(kwargs_call: Callable[P, Any]) -> Callable[[Callable[..., T]]
         return cast(Callable[P, T], func)
 
     return return_func
+
+
+def jprint(d: Any, **kwargs: Any):
+    console.print(Syntax(json.dumps(d, indent=2), "json", **kwargs))

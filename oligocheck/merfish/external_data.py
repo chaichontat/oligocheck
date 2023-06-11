@@ -154,6 +154,24 @@ class ExternalData:
             .collect()
         )
 
+    def check_gene_names(self, genes: list[str]):
+        notfound = []
+        ok: list[str] = []
+        for gene in genes:
+            try:
+                self.gene_to_eid(gene)
+                ok.append(gene)
+            except ValueError:
+                print(f"Gene {gene} not found in gtf")
+                notfound.append(gene)
+        converted, res = find_aliases(notfound)
+
+        return (
+            ok + [x["symbol"] for x in converted.values()],
+            {k: v["symbol"] for k, v in converted.items()},
+            res,
+        )
+
 
 # %%
 def get_rrna(path: str) -> set[str]:
@@ -211,6 +229,14 @@ def find_aliases(genes: Iterable[str], species: str = "mouse"):
         else:
             eid = [y["gene"] for y in x["ensembl"]]
         out[x["query"]] = GeneDict(gene=eid, symbol=x["symbol"])
+
+    # Simple case of duplication: only keep ensembl name.
+    for d, _ in res["dup"].copy():
+        queries = [x for x in res["out"] if x["query"] == d and "ensembl" in x["query"]]
+        if len(queries) == 1:
+            out[d] = GeneDict(gene=[queries[0]["ensembl"]["gene"]], symbol=queries[0]["symbol"])
+            res["out"].remove((d, _))
+
     return out, cast(ResDict, res)  # missing, dup
 
 
