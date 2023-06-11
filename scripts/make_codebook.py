@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 
 from oligocheck.merfish.external_data import ExternalData
-from oligocheck.merfish.readouts.codebook import CodebookPicker
+from oligocheck.picker.codebook import CodebookPicker
 
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
