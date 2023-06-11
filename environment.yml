@@ -16,6 +16,7 @@ dependencies:
   - pandas
   - pip
   - polars
+  - pyarrow
   - rich
   - seaborn
   - xlsx2csv
