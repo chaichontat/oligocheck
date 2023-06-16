@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from oligocheck.logging import log, setup_logging
-from oligocheck.merfish.external_data import ExternalData, find_aliases
+from oligocheck.external.external_data import ExternalData, find_aliases
 
 setup_logging()
 # from prefect import flow, task
@@ -33,12 +33,16 @@ def runpls(gene: str, skipdone: bool = False) -> str:
         return ""
 
     log("running", gene)
-    res = subprocess.run(
-        ["python", "scripts/new_postprocess.py", gene],
-        check=True,
-        capture_output=True,
-        cwd=os.getcwd(),
-    )
+    try:
+        res = subprocess.run(
+            ["python", "scripts/new_postprocess.py", gene],
+            check=True,
+            capture_output=True,
+            cwd=os.getcwd(),
+        )
+    except subprocess.CalledProcessError as e:
+        print(e.stderr.decode())
+        raise e
     log(f"ran {gene}")
     return res.stdout.decode()
 

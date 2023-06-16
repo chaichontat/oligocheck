@@ -9,11 +9,14 @@ import numpy as np
 import polars as pl
 
 from oligocheck.geneframe import GeneFrame
+from oligocheck.logging import setup_logging
 from oligocheck.merfish.alignment import gen_fastq, run_bowtie
 from oligocheck.merfish.crawler import crawler
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.external.external_data import ExternalData
 from oligocheck.merfish.filtration import check_kmers, the_filter
 from oligocheck.seqcalc import hp_fish, tm_hybrid
+
+setup_logging()
 
 sys.setrecursionlimit(5000)
 pl.Config.set_fmt_str_lengths(100)
@@ -23,14 +26,11 @@ fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
 kmer18 = pl.read_csv(
     "data/mm39/kmer_genome18.txt", separator=" ", has_header=False, new_columns=["kmer", "count"]
 )
-# rrnas = get_rrna("data/mm39/Mus_musculus.GRCm39.ncrna.fa.gz")
 trna_rna_kmers = set(
     pl.read_csv(
         "data/mm39/kmer_trcombi15.txt", separator=" ", has_header=False, new_columns=["kmer", "count"]
     )["kmer"]
 )
-
-
 kmerset = set(kmer18["kmer"])
 
 try:
@@ -103,12 +103,13 @@ def get_pseudogenes(gene: str, y: GeneFrame, limit: int = 5) -> tuple[pl.Series,
 # %%
 def run(
     gene: str,
+    output: str | Path,
     overlap: int = -2,
     allow_pseudo: bool = True,
     ignore_revcomp: bool = False,
     realign: bool = False,
 ):
-    Path("output").mkdir(exist_ok=True)
+    (output := Path(output)).mkdir(exist_ok=True)
     tss_gencode = set(gtf.filter_gene(gene)["transcript_id"])
     tss_all = gtf_all.filter_gene(gene)["transcript_id"]
     if not len(tss_gencode):
@@ -116,7 +117,7 @@ def run(
     canonical = gtf_all.filter_gene(gene).filter(pl.col("tag") == "Ensembl_canonical")[0, "transcript_id"]
     tss_gencode.add(canonical)  # Some canonical transcripts are not in GENCODE.
 
-    if realign or not Path(f"output/{gene}_all.parquet").exists():
+    if realign or not (output / f"{gene}_all.parquet").exists():
         y, crawled = block_bowtie(gene, canonical)
 
         offtargets = (
@@ -126,12 +127,12 @@ def run(
             .with_columns(name=pl.col("transcript").apply(gtf_all.ts_to_gene))
         )
 
-        y.write_parquet(f"output/{gene}_all.parquet")
-        offtargets.write_parquet(f"output/{gene}_offtargets.parquet")
+        y.write_parquet(output / f"{gene}_all.parquet")
+        offtargets.write_parquet(output / f"{gene}_offtargets.parquet")
     else:
         print(f"{gene} reading from cache.")
-        y = GeneFrame.read_parquet(f"output/{gene}_all.parquet")
-        offtargets = pl.read_parquet(f"output/{gene}_offtargets.parquet")
+        y = GeneFrame.read_parquet(output / f"{gene}_all.parquet")
+        offtargets = pl.read_parquet(output / f"{gene}_offtargets.parquet")
 
     if ignore_revcomp:
         print("Ignoring revcomped reads.", len(y), end=" ")
@@ -148,7 +149,7 @@ def run(
 
     tss_pseudo, pseudo_name = get_pseudogenes(gene, y) if allow_pseudo else (pl.Series(), pl.Series())
     print("Pseudogenes included", pseudo_name)
-    pl.DataFrame(dict(transcript=[*tss_all, *tss_pseudo])).write_csv(f"output/{gene}_acceptable_tss.csv")
+    pl.DataFrame(dict(transcript=[*tss_all, *tss_pseudo])).write_csv(output / f"{gene}_acceptable_tss.csv")
     ff = y.filter_by_match([*tss_all, *tss_pseudo], match=0.8, match_max=0.8)
 
     if len(tss_pseudo):
@@ -201,19 +202,22 @@ def run(
     final = the_filter(ff, overlap=overlap).filter(pl.col("flag") & 16 == 0)
     print(final)
     final.write_parquet(
-        f"output/{gene}_final.parquet" if overlap < 0 else f"output/{gene}_final_overlap_{overlap}.parquet"
+        output / f"{gene}_final.parquet"
+        if overlap < 0
+        else output / f"{gene}_final_overlap_{overlap}.parquet"
     )
 
 
 @click.command()
 @click.argument("gene")
-# @click.option("--output", "-o", type=click.Path(), default="output/")
+@click.option("--output", "-o", type=click.Path(), default="output/")
 @click.option("--debug", "-d", is_flag=True)
 @click.option("--ignore-revcomp", "-r", is_flag=True)
 @click.option("--overlap", "-O", type=int, default=-2)
 @click.option("--realign", is_flag=True)
 def main(
     gene: str,
+    output: str,
     ignore_revcomp: bool,
     overlap: int = -2,
     allow_pseudo: bool = True,
@@ -225,18 +229,18 @@ def main(
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        run(gene, overlap=overlap, allow_pseudo=allow_pseudo, ignore_revcomp=ignore_revcomp, realign=realign)
+        run(
+            gene,
+            output=output,
+            overlap=overlap,
+            allow_pseudo=allow_pseudo,
+            ignore_revcomp=ignore_revcomp,
+            realign=realign,
+        )
     except Exception as e:
         raise Exception(f"Failed to run {gene}") from e
-
-    # Path(output).mkdir(exist_ok=True, parents=True)
-    # m.write_parquet(f"{output}/{gene}.parquet")
-    # with open(f"{output}/{gene}.json", "w") as f:
-    #     json.dump(md, f)
 
 
 if __name__ == "__main__":
     main()
-# %%
-
 # %%

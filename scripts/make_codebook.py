@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.external.external_data import ExternalData
 from oligocheck.picker.codebook import CodebookPicker
 
 gtf_all = ExternalData(

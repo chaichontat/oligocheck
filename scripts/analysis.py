@@ -1,16 +1,23 @@
 # %%
-import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import polars as pl
 
+from oligocheck.external.external_data import ExternalData
 from oligocheck.geneframe import GeneFrame
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.merfish.alignment import gen_fasta
 from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_structure
-from oligocheck.seqcalc import tm_fish, tm_hybrid, tm_match
-from oligocheck.sequtils import gc_content, reverse_complement, stripplot
+from oligocheck.seqcalc import tm_fish, tm_match
+from oligocheck.sequtils import reverse_complement, stripplot
+
+gtf = ExternalData(
+    cache="data/mm39/gencode_vM32_transcripts.parquet",
+    path="data/mm39/gencode.vM32.chr_patch_hapl_scaff.basic.annotation.gtf",
+    fasta="data/mm39/combi.fa.gz",
+)
+
 
 gtf_all = ExternalData(
     cache="data/mm39/gencode_vM32_transcripts_all.parquet",
@@ -19,9 +26,13 @@ gtf_all = ExternalData(
 )
 pl.Config.set_fmt_str_lengths(100)
 pl.Config.set_tbl_rows(100)
-
-genes = Path("panels/motorcortex_converted.txt").read_text().splitlines()
-
+# %%
+snos = gtf_all.gtf.filter(pl.col("gene_biotype") == "snoRNA")["transcript_id"]
+df = pl.DataFrame(dict(name=snos, seq=snos.apply(gtf_all.get_seq)))
+Path("data/snorna.fa").write_text(gen_fasta(names=df["name"], seqs=df["seq"]).getvalue())
+# %%
+genes = Path("panels/motorcortex_smgenes.txt").read_text().splitlines()
+# %%
 dfx, sams, filtereds, offtargets, overlapped = {}, {}, {}, {}, {}
 for gene in genes:
     dfx[gene] = pl.read_parquet(f"output/{gene}_final.parquet")
@@ -35,7 +46,7 @@ for gene in genes:
 dfx = dfx | overlapped
 # %%
 dfs = GeneFrame.concat(dfx.values()).sort(
-    ["gene", pl.col("isoforms").arr.lengths(), "priority", "pos_end"],
+    ["gene", pl.col("isoforms").list.lengths(), "priority", "pos_end"],
     descending=[False, True, False, True],
 )
 
@@ -50,10 +61,10 @@ dfs = GeneFrame.concat(dfx.values()).sort(
 counts = dfs.count()
 # length = {k: len(v) for k, v in counts.iter_rows()}
 # filter length less than 30
-short = {k: v for k, v in counts.iter_rows() if v < 45}
+short = {k: v for k, v in counts.iter_rows() if v < 48}
 print(len(counts), len(short))
 # %%
-target = "Sgcd"
+target = "Mup5"
 stripplot(
     all=sams[target]["pos_end"],
     filtered=filtereds[target]["pos_end"],
@@ -103,7 +114,7 @@ stripplot(all=sam["pos_end"], filtered=filtered["pos_end"], s=df["pos_end"])
 # %%
 from oligocheck.merfish.nnupack import gen_model, nonspecific_test, secondary_structure
 
-dfs.gene("Slc17a6").with_columns(
+dfs.lazy().gene("Slc17a6").with_columns(
     secondary=pl.col("seq").apply(lambda x: secondary_structure(x)["(probe)"][3])
 )
 # %%

@@ -6,12 +6,14 @@ from itertools import cycle, permutations
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+import numpy as np
 import polars as pl
 
 from oligocheck.geneframe import GeneFrame
 from oligocheck.merfish.alignment import gen_fasta, gen_fastq, run_bowtie
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.external.external_data import ExternalData
 from oligocheck.merfish.pairwise import pairwise_alignment
+from oligocheck.picker.codebook import CodebookPickerSingleCell
 from oligocheck.seqcalc import tm_hybrid
 from oligocheck.sequtils import reverse_complement, slide
 
@@ -33,50 +35,53 @@ trna_rna_kmers = set(
 
 kmerset = set(kmer18["kmer"])
 
-ori = pl.read_excel("panels/motorcortex_ori.xlsx", read_csv_options={"skip_rows": 1})
-orir = pl.read_excel("panels/motorcortex_ori_readout.xlsx", read_csv_options={"skip_rows": 1})
-sm = orir.filter(~pl.col("Purpose").str.starts_with("MERFISH"))["Purpose"]
-# %%
+# ori = pl.read_excel("panels/motorcortex_ori.xlsx", read_csv_options={"skip_rows": 1})
+# orir = pl.read_excel("panels/motorcortex_ori_readout.xlsx", read_csv_options={"skip_rows": 1})
+# sm = orir.filter(~pl.col("Purpose").str.starts_with("MERFISH"))["Purpose"]
+# # %%
+# # %%
+# convert = json.loads(Path("panels/motorcortex_convert.json").read_text())
+# convert["01-Mar"] = "Marchf1"
 
-# %%
-convert = json.loads(Path("panels/motorcortex_convert.json").read_text())
-convert["01-Mar"] = "Marchf1"
+# mapping = dict(orir[["Sequence", "Readout probe name"]].iter_rows())
+# codebook = (
+#     ori.filter(~pl.col("Gene name").is_in(sm))
+#     .with_columns(
+#         ro1=pl.col("Sequence").str.split(" ").list.get(2),
+#         ro2=pl.col("Sequence").str.split(" ").list.get(5),
+#     )
+#     .select(["Gene name", "ro1", "ro2"])
+#     .groupby("Gene name")
+#     .all()
+#     .select("Gene name", combi=pl.col("ro1").list.concat(pl.col("ro2")).list.unique())
+#     .explode("combi")
+#     .with_columns(
+#         pl.col("Gene name").apply(lambda x: convert.get(x, x)).alias("Gene name"),
+#         pl.col("combi").apply(reverse_complement).apply(mapping.get).alias("combi"),
+#     )
+# )
+# bitnmap = dict(
+#     codebook[["combi"]]
+#     .unique("combi")
+#     .sort("combi")
+#     .with_row_count("id", offset=1)[["combi", "id"]]
+#     .iter_rows()
+# )
 
-mapping = dict(orir[["Sequence", "Readout probe name"]].iter_rows())
-codebook = (
-    ori.filter(~pl.col("Gene name").is_in(sm))
-    .with_columns(
-        ro1=pl.col("Sequence").str.split(" ").list.get(2),
-        ro2=pl.col("Sequence").str.split(" ").list.get(5),
-    )
-    .select(["Gene name", "ro1", "ro2"])
-    .groupby("Gene name")
-    .all()
-    .select("Gene name", combi=pl.col("ro1").list.concat(pl.col("ro2")).list.unique())
-    .explode("combi")
-    .with_columns(
-        pl.col("Gene name").apply(lambda x: convert.get(x, x)).alias("Gene name"),
-        pl.col("combi").apply(reverse_complement).apply(mapping.get).alias("combi"),
-    )
-)
-bitnmap = dict(
-    codebook[["combi"]]
-    .unique("combi")
-    .sort("combi")
-    .with_row_count("id", offset=1)[["combi", "id"]]
-    .iter_rows()
-)
+# codebook = dict(
+#     codebook.with_columns(combi=pl.col("combi").apply(bitnmap.get)).groupby("Gene name").all().iter_rows()
+# )
 
-readouts = pl.read_csv("data/readout_ref_filtered.csv")
-codebook = dict(
-    codebook.with_columns(combi=pl.col("combi").apply(bitnmap.get)).groupby("Gene name").all().iter_rows()
-)
-
-# codebook = pl.read_csv("panels/celltype_codebook.csv")
 # blacklist = set(pl.read_csv("data/readout_fused_bad.csv")[["split1", "split2"]].iter_rows())
-genes = Path("panels/motorcortex_converted.txt").read_text().splitlines()
+# codebook = pl.read_csv("panels/celltype_codebook.csv")
+name = 'sm'
+readouts = pl.read_csv("data/readout_ref_filtered.csv")
+# genes = Path("zach_26.txt").read_text().splitlines()
+# genes = Path(f"{name}_25.txt").read_text().splitlines()
+smgenes = ['Cdc42','Neurog2','Ccnd2']
+genes, _, _ = gtf_all.check_gene_names(smgenes)
 acceptable_tss = {g: set(pl.read_csv(f"output/{g}_acceptable_tss.csv")["transcript"]) for g in genes}
-n, short_threshold = 70, 65
+n, short_threshold = 67, 65
 # %%
 dfx, overlapped = {}, {}
 for gene in genes:
@@ -132,12 +137,58 @@ cutted = GeneFrame(
 )
 # %%
 counts = cutted.count("gene")
-counts, len(cutted)
+print(len(cutted))
+
+print("dumped", counts.filter(pl.col("count") < 40))
+counts = counts.filter(pl.col("count") >= 40)
+
+# %%
+scdata = pl.read_parquet("data/fpkm/embryo_raw.parquet")
+
+# %%
+# cl = counts[:, perc999.filter(pl.col("counts") < 50)["gene"]].to_numpy()
+import importlib
+
+import oligocheck.picker.codebook as CB
+
+importlib.reload(CB)
+
+if name == "zach":
+
+    code_existing = json.loads(Path("constructed/cs.json").read_text())
+    code_matrix = np.zeros((len(code_existing), 27), dtype=bool)
+    for i, row in enumerate(code_existing.values()):
+        for code in row:
+            code_matrix[i, code-1] = 1
+    assert code_matrix[:,24:].sum() == 0
+    code_gene = scdata[:, list(code_existing.keys())]
+    counts = counts.filter(~pl.col("gene").is_in(list(code_existing.keys())))
+
+    mhd = CB.CodebookPickerSingleCell("static/mhd4_27bit.csv", code_existing=code_matrix, counts_existing=code_gene.to_numpy())
+    best, perro = mhd.find_optimalish(scdata[:, counts["gene"]], iterations=100)
+    codebook = mhd.gen_codebook(int(best))[: counts.shape[0]]
+    assert not set(tuple(x) for x in codebook) & set(tuple(x) for x in code_matrix)
+    codebook = np.where(codebook)[1].reshape([-1, 4])
+    codebook = dict(zip(counts['gene'], (codebook+1).tolist()))
+elif name =="cs":
+    mhd = CB.CodebookPickerSingleCell("static/mhd4_27bit.csv", subset=(0,24))
+    best, perro = mhd.find_optimalish(scdata[:, counts["gene"]], iterations=100)
+    codebook = mhd.gen_codebook(int(best))[: counts.shape[0]]
+    codebook = np.where(codebook)[1].reshape([-1, 4])
+    codebook = dict(zip(counts['gene'], (codebook+1).tolist()))
+elif name == "sm":
+    codebook = {g:[i] for i,g in enumerate(genes, 28)}
+
+
+#%%
+# assert not codebook[:,24:].sum()
+
+
 
 
 # %%
 def stitch(seq: str, codes: Sequence[str], sep: str = "TT") -> str:
-    return codes[0] + "TT" + codes[0] + sep + seq + sep + codes[1] + "TT" + codes[1]
+    return codes[0] + "TT" + codes[0] + sep + seq + sep + codes[1]
 
 
 def gen_stitch(n: int, seq: str, seq_map: dict[str, str], ros: Iterator[tuple[str, str]]):
@@ -149,13 +200,18 @@ def gen_stitch(n: int, seq: str, seq_map: dict[str, str], ros: Iterator[tuple[st
                 yield consd, codes
 
 
-def construct_encoding(seq_encoding: pl.DataFrame, return_all: bool = False):
+def construct_encoding(seq_encoding: pl.DataFrame, return_all: bool = False, sm:bool=False):
     gene = seq_encoding[0, "gene"]
     ros = readouts.filter(pl.col("id").is_in(codebook[gene]))
+    if sm and not len(codebook[gene]) == 1:
+        raise ValueError(f"Gene {gene} has multiple readouts but sm is True")
     seq_map = dict(ros[["name", "seq"]].iter_rows())
 
     # No blacklists here.
-    fusedreadouts: list[tuple[str, str]] = [cs for cs in permutations(ros["name"], 2)]
+    if not sm:
+        fusedreadouts: list[tuple[str, str]] = [cs for cs in permutations(ros["name"], 2)]
+    else:
+        fusedreadouts: list[tuple[str, str]] = [(ros[0, 'name'], ros[0, 'name'])]
 
     out = dict(name=[], constructed=[], code1=[], code2=[])
     ros = cycle(fusedreadouts)
@@ -185,15 +241,20 @@ def construct_encoding(seq_encoding: pl.DataFrame, return_all: bool = False):
     return pl.DataFrame(out)
 
 
-headers = {"celltype": "GAGAGGCGAGGACACCTACAG"}
-footers = {"celltype": "TATTTCCCTATAGTGAGTCGTATTAGACCGGTCT"}
+headers = {"cs": "TGGCGACTGAAGTACGAGTCC", "zach": "GAGAGGCGAGGACACCTACAG", 'sm': "CAACCGTACCGCTTGCTTACC"}
+
 
 # %%
-constructed = (
-    cutted.groupby("gene")
-    .apply(lambda df: df.join(construct_encoding(df), on="name", how="inner"))
-    .with_columns(constructed=headers["celltype"] + pl.col("constructed") + "TATTTCCC")
-)
+constructed = []
+for gene, df_ in cutted.filter(pl.col("gene").is_in(counts['gene'])).groupby("gene"):
+    df_ = df_.join(construct_encoding(df_, sm=name == "sm"), on="name", how="inner").with_columns(constructed=headers[name] + pl.col("constructed") + "TATTTCCC")
+    constructed.append(df_)
+constructed = GeneFrame.concat(constructed)
+# constructed = (
+#     cutted.groupby("gene")
+#     .apply(lambda df: df.join(construct_encoding(df), on="name", how="inner"))
+#     .with_columns(constructed=headers["celltype"] + pl.col("constructed") + "TATTTCCC")
+# )
 
 
 # %%
@@ -252,10 +313,10 @@ len(nogo)
 
 pass2 = []
 
-for _, df in dfs.filter(pl.col("name").is_in(nogo)).groupby("gene"):
+for _, df in cutted.filter(pl.col("name").is_in(nogo)).groupby("gene"):
     pass2.append(
-        construct_encoding(df, return_all=True).with_columns(
-            constructed=headers["celltype"] + pl.col("constructed") + "TATTTCCC"
+        construct_encoding(df, sm=name=="sm", return_all=True).with_columns(
+            constructed=headers[name] + pl.col("constructed") + "TATTTCCC"
         )
     )
 pass2 = pl.concat(pass2).with_columns(
@@ -265,7 +326,7 @@ pass2 = pl.concat(pass2).with_columns(
 # %%
 nogo2 = check_offtargets(pass2, acceptable_tss)
 # %%
-constructed = pl.concat(
+constructed = GeneFrame.concat(
     [
         pass1,
         cutted.join(
@@ -278,13 +339,36 @@ constructed = pl.concat(
 
 len(constructed)
 # %%
-finalfiltered = constructed.filter(~pl.col("name").is_in(offtarget["name"]))
 
-# .groupby("gene").agg(pl.count()).sort("count")
+footers = {"zach": "TATAGTGAGTCGTATTAGACCGGTCT", "cs": "TATAGTGAGTCGTATTAGAGGCACTG", 'sm': 'TATAGTGAGTCGTATTAAGGCGGTT' }
+constructed.with_columns(constructed=pl.col("constructed") + footers[name]).write_parquet(f"constructed/{name}.parquet")
+
+Path(f"constructed/{name}.json").write_text(json.dumps(codebook, indent=2))
+#%%
+#%%
+combi =GeneFrame.concat([pl.read_parquet("constructed/zach.parquet"), pl.read_parquet("constructed/cs.parquet"), pl.read_parquet("constructed/sm.parquet")])
+
+len(combi)
 
 # %%
-constructed.groupby("gene").agg(pl.count()).sort("count").filter(pl.col("count").lt(20))
+combi.write_parquet("constructed/combi.parquet")
+combi[['gene']].unique('gene').sort('gene').write_csv("constructed/combi.txt", has_header=False)
+#%%
 
+
+def backfill(seq: str, target:int= 167):
+    return "GGTAAGAAGTGAGTTAGTGGAA"[:max(0, target - len(seq))] + seq
+
+combi_filled = combi.with_columns(constructed=pl.col("constructed").apply(backfill))
+
+t7 = reverse_complement('TAATACGACTCACTATAGGGAAATA')
+assert combi_filled.select(pl.col("constructed").str.contains(t7))['constructed'].all()
+assert combi_filled.select(pl.col("constructed").str.contains("|".join(footers.values())))['constructed'].all()
+assert combi_filled.select(pl.col("constructed").str.contains("|".join(headers.values())))['constructed'].all()
+
+length = combi_filled['constructed'].apply(len)
+print(length.min(), length.max())
+combi_filled[['constructed']].write_csv("constructed/combi_filled.txt", has_header=False)
 
 # %%
 def extract_seqs(df: pl.DataFrame, n: int | None = 40):
@@ -337,4 +421,4 @@ b = (
     .with_columns(transcript_name=pl.col("transcript").apply(gtf_all.ts_to_gene))
     .filter(pl.col("gene") != pl.col("transcript_name"))
     .filter(~pl.col("transcript_name").str.starts_with("Gm"))
-)
+))
