@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import reduce, wraps
 from io import StringIO
+from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Literal, ParamSpec, TypeVar, overload
 
 import polars as pl
@@ -91,23 +92,25 @@ class GeneFrame(pl.DataFrame):
         return cls(pl.concat(dfs))
 
     @classmethod
-    def read_parquet(cls, path: str):
+    def read_parquet(cls, path: str | Path):
         return cls(pl.read_parquet(path))
 
     @staticmethod
-    def _count_match(df: pl.DataFrame):
-        return df.join(
-            df[["id", "mismatched_reference"]]
-            .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
-            .explode("mismatched_reference")
-            .with_columns(pl.col("mismatched_reference").cast(pl.UInt8))
-            .groupby("id")
-            .agg(
-                match=pl.col("mismatched_reference").sum(),
-                match_max=pl.col("mismatched_reference").max(),
-            ),
-            on="id",
-            how="left",
+    def _count_match(df: pl.DataFrame) -> GeneFrame:
+        return GeneFrame(
+            df.join(
+                df[["id", "mismatched_reference"]]
+                .with_columns(mismatched_reference=pl.col("mismatched_reference").str.extract_all(r"(\d+)"))
+                .explode("mismatched_reference")
+                .with_columns(pl.col("mismatched_reference").cast(pl.UInt8))
+                .groupby("id")
+                .agg(
+                    match=pl.col("mismatched_reference").sum(),
+                    match_max=pl.col("mismatched_reference").max(),
+                ),
+                on="id",
+                how="left",
+            )
         )
 
     @classmethod

@@ -7,7 +7,7 @@ from typing import Iterable
 import polars as pl
 from Bio import AlignIO
 
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.external.external_data import ExternalData
 
 
 def gen_fastq(names: Iterable[str], seqs: Iterable[str]) -> io.StringIO:

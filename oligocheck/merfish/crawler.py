@@ -1,37 +1,36 @@
 # %%
 
 import polars as pl
-import primer3
 
-from oligocheck.seqcalc import tm_hybrid
+from oligocheck.seqcalc import hp_fish, tm_hybrid
 from oligocheck.sequtils import gc_content
 
 
-def crawler(seq: str, prefix: str) -> pl.DataFrame:
-    minmax = [25, 46]
-    gc_limit = [0.3, 0.7]
-    j = minmax[0]
-    hp_limit = 40 + 0.65 * 30
-
+def crawler(
+    seq: str,
+    prefix: str,
+    length_limit: tuple[int, int] = (25, 46),
+    gc_limit: tuple[float, float] = (0.3, 0.7),
+    tm_limit: float = 51,
+    hairpin_limit: float = 40 + 0.65 * 30,
+) -> pl.DataFrame:
+    j = length_limit[0]
     names = []
     seqs = []
 
-    for i in range(len(seq) - minmax[0]):
+    for i in range(len(seq) - length_limit[0]):
         while True:
-            if j - i < minmax[0]:
+            if j - i < length_limit[0]:
                 j += 1
                 continue
-            if j - i > minmax[1] or j > len(seq):
+            if j - i > length_limit[1] or j > len(seq):
                 break
             if (gc_content(seq[i:j]) < gc_limit[0]) or (gc_content(seq[i:j]) > gc_limit[1]):
                 j += 1
                 continue
 
-            if (tm := tm_hybrid(seq[i:j])) > 51:
-                if (
-                    primer3.calc_hairpin_tm(seq[i:j], mv_conc=330, dv_conc=0, dntp_conc=0, dna_conc=1)
-                    < hp_limit
-                ):
+            if tm_hybrid(seq[i:j]) > tm_limit:
+                if hp_fish(seq[i:j]) < hairpin_limit:
                     names.append(f"{prefix}:{i}-{j-1}")
                     seqs.append(seq[i:j])
                 break

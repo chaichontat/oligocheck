@@ -77,7 +77,7 @@ def tm_hybrid(seq: str, **kwargs: float) -> float:
 
 
 def hp_fish(seq: str, **kwargs: float) -> float:
-    return primer3.calc_hairpin_tm(seq, **{**dict(mv_conc=330, dv_conc=0, dntp_conc=0, dna_conc=1), **kwargs})
+    return primer3.calc_hairpin_tm(seq, **{**dict(mv_conc=390, dv_conc=0, dntp_conc=0, dna_conc=1), **kwargs})
 
 
 r = re.compile(r"(\|{15,})")

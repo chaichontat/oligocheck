@@ -4,11 +4,43 @@ from pathlib import Path
 import polars as pl
 from Levenshtein import distance
 
+from oligocheck.geneframe import GeneFrame
 from oligocheck.merfish.alignment import gen_bowtie_index, gen_fasta, gen_fastq, run_bowtie
-from oligocheck.merfish.external_data import ExternalData
+from oligocheck.external.external_data import ExternalData
 from oligocheck.seqcalc import tm_fish
 
+
 seed = "TTACACTCCATCCACTCAA"
+chosen = """RS0015
+RS0083
+RS0095
+RS0332
+RS0451
+RS0468
+RS0548
+RS0639
+RS0708
+RS0763
+RS0793
+RS0820
+RS0967
+RS1040
+RS1261
+RS1470
+RS3505
+RS3811
+RS4070
+RS4111
+RS4164
+RS4216
+RS4363
+RS4465
+RS0109
+RS0584
+RS0707
+RS0730
+RS1404
+RS3791""".splitlines()
 df = pl.read_csv("data/readout_ref.csv", separator="\t")
 # df = pl.read_csv("newreadouts.csv").with_columns(bit=pl.col("id"), name=pl.col("id").cast(pl.Utf8))
 gtf_all = ExternalData(
@@ -18,11 +50,11 @@ gtf_all = ExternalData(
 )
 fpkm = pl.read_parquet("data/fpkm/P0_combi.parquet")
 # %%
-ok = [seed]
-names = ["polyT"]
+ok = [seed, *df.filter(pl.col("name").is_in(chosen))["seq"]]
+names = ["polyT", *df.filter(pl.col("name").is_in(chosen))["name"]]
 for row in df.iter_rows(named=True):
     bit, name, seq = row["bit"], row["name"], row["seq"]
-    if distance(seq, seed) < 9:
+    if distance(seq, seed) < 7:
         continue
     for s in ok:
         if distance(s, seq) < 7:
@@ -35,16 +67,12 @@ print(len(ok))
 # %%
 picked = pl.DataFrame({"name": names, "seq": ok})
 # %%
-offtarget = parse_sam(
+offtarget = GeneFrame.from_sam(
     run_bowtie(
         gen_fastq(names=names, seqs=ok).getvalue(), "data/humouse/humouse", seed_length=12, threshold=14
     ),
     split_name=False,
 )
-
-# %%
-
-offtarget = count_match(offtarget)
 
 # %%
 nottoobad = (
@@ -53,10 +81,22 @@ nottoobad = (
 picked2 = (
     picked.filter(pl.col("name").is_in(nottoobad["name"]))
     .with_columns(pl.col("seq").apply(lambda x: tm_fish(x, formamide=0)).alias("tm"))
-    .filter(pl.col("tm").is_between(51, 55))
+    .filter(pl.col("tm").is_between(51, 56.5))
     .sort("name")
 )
-picked2.sort("name").with_row_count("id", 1).write_csv("data/readout_ref_filtered.csv")
+
+
+# %%
+
+
+ddf = pl.DataFrame({"name": chosen}).with_row_count("id", 1).join(df[["name", "seq"]], on="name").sort("id")
+ddf.write_csv("data/readout_ref_filtered.csv")
+
+ddf.with_columns(seq="/5AmMC6/" + pl.col("seq") + "/3AmMO/")[["name", "seq"]].write_csv(
+    "readouts_idt.tsv", separator="\t"
+)
+
+
 # %%
 
 fusedreadout = []
@@ -70,17 +110,15 @@ for i in range(len(picked)):
     )
 
 fused = pl.DataFrame(fusedreadout)
-y = count_match(
-    parse_sam(
-        run_bowtie(
-            gen_fastq(fused["name"], fused["seq"]).getvalue(),
-            "data/mm39/mm39",
-            seed_length=11,
-            n_return=50,
-            threshold=14,
-        ),
-        split_name=False,
-    )
+y = GeneFrame.from_sam(
+    run_bowtie(
+        gen_fastq(fused["name"], fused["seq"]).getvalue(),
+        "data/mm39/mm39",
+        seed_length=11,
+        n_return=50,
+        threshold=14,
+    ),
+    split_name=False,
 ).with_columns(
     split1=pl.col("transcript").str.split("_").list.get(0),
     split2=pl.col("transcript").str.split("_").list.get(1),

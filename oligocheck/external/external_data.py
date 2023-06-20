@@ -9,6 +9,8 @@ import polars as pl
 import pyfastx
 from Bio import SeqIO
 
+from oligocheck.boilerplate import jprint
+
 mg = mygene.MyGeneInfo()
 
 # Not used anymore but keeping it here in case we need it again.
@@ -241,3 +243,19 @@ def find_aliases(genes: Iterable[str], species: str = "mouse"):
 
 
 # %%
+def manual_fix(res: ResDict, sel: dict[str, str]):
+    dupes = {x[0] for x in res["dup"]}
+    for line in dupes:
+        if line in sel:
+            continue
+        jprint(choices := {i: x for i, x in enumerate((x for x in res["out"] if x["query"] == line), 1)})
+        inp = input()
+        if not inp:
+            break
+        try:
+            n = int(inp)
+        except ValueError:
+            sel[line] = inp
+        else:
+            sel[line] = choices[n]["symbol"] if n != 0 else line  # 0 means keep original
+    print("Done!")
